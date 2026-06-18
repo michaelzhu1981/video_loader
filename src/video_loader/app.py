@@ -25,6 +25,19 @@ MODE_DESCRIPTIONS = {
     "jpeg_sequence": "JPEG 图片序列：下载播放列表中的 jpg/jpeg 图片片段，并合并为视频。",
 }
 TASK_TOOLTIP = "\n".join(MODE_DESCRIPTIONS.values())
+HEADER_PRESETS = {
+    "默认浏览器": "User-Agent: Mozilla/5.0\nAccept: */*",
+    "Chrome 桌面": (
+        "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\n"
+        "Accept: */*\n"
+        "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8"
+    ),
+    "HLS / m3u8": "User-Agent: Mozilla/5.0\nAccept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+    "带来源 Referer": "User-Agent: Mozilla/5.0\nReferer: https://example.com/\nOrigin: https://example.com",
+}
+HEADER_HINT = "请求头格式：每行一个，例如 User-Agent: Mozilla/5.0、Referer: https://example.com/"
+COOKIE_HINT = "Cookie 格式：key=value; key2=value2，可直接粘贴浏览器 Network 面板里的 Cookie 值。"
 
 
 class VideoLoaderApp(ctk.CTk):
@@ -53,6 +66,7 @@ class VideoLoaderApp(ctk.CTk):
         self.verify_ssl_var = ctk.BooleanVar(value=True)
         self.combine_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value=self._ffmpeg_status())
+        self.header_preset_var = ctk.StringVar(value="默认浏览器")
 
         self._configure_grid()
         self._build_header()
@@ -134,16 +148,34 @@ class VideoLoaderApp(ctk.CTk):
         self.combine = ctk.CTkCheckBox(panel, text="合并已下载片段", variable=self.combine_var)
         self.combine.grid(row=7, column=0, sticky="w", padx=18, pady=(2, 10))
 
-        advanced = ctk.CTkLabel(panel, text="请求头和 Cookie", font=ctk.CTkFont(size=14, weight="bold"))
-        advanced.grid(row=8, column=0, sticky="w", padx=18, pady=(8, 6))
+        advanced_row = ctk.CTkFrame(panel, fg_color="transparent")
+        advanced_row.grid(row=8, column=0, sticky="ew", padx=18, pady=(8, 6))
+        advanced_row.grid_columnconfigure(0, weight=1)
+        advanced = ctk.CTkLabel(advanced_row, text="请求头和 Cookie", font=ctk.CTkFont(size=14, weight="bold"))
+        advanced.grid(row=0, column=0, sticky="w")
+        self.header_preset_menu = ctk.CTkOptionMenu(
+            advanced_row,
+            values=list(HEADER_PRESETS.keys()),
+            variable=self.header_preset_var,
+            width=138,
+            command=self._apply_header_preset,
+        )
+        self.header_preset_menu.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkLabel(panel, text=HEADER_HINT, text_color="#8b949e", wraplength=360, justify="left").grid(
+            row=9, column=0, sticky="w", padx=18, pady=(0, 4)
+        )
         self.headers_box = ctk.CTkTextbox(panel, height=86, fg_color="#0d1117", border_width=1, border_color="#30363d")
-        self.headers_box.grid(row=9, column=0, sticky="ew", padx=18, pady=6)
-        self.headers_box.insert("1.0", "User-Agent: Mozilla/5.0")
+        self.headers_box.grid(row=10, column=0, sticky="ew", padx=18, pady=6)
+        self.headers_box.insert("1.0", HEADER_PRESETS[self.header_preset_var.get()])
+        ctk.CTkLabel(panel, text=COOKIE_HINT, text_color="#8b949e", wraplength=360, justify="left").grid(
+            row=11, column=0, sticky="w", padx=18, pady=(2, 4)
+        )
         self.cookies_box = ctk.CTkTextbox(panel, height=70, fg_color="#0d1117", border_width=1, border_color="#30363d")
-        self.cookies_box.grid(row=10, column=0, sticky="ew", padx=18, pady=6)
+        self.cookies_box.grid(row=12, column=0, sticky="ew", padx=18, pady=6)
 
         action_row = ctk.CTkFrame(panel, fg_color="transparent")
-        action_row.grid(row=11, column=0, sticky="ew", padx=18, pady=(14, 18))
+        action_row.grid(row=13, column=0, sticky="ew", padx=18, pady=(14, 18))
         action_row.grid_columnconfigure((0, 1), weight=1)
         self.start_button = ctk.CTkButton(action_row, text="开始", command=self._start_download, fg_color="#238636")
         self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
@@ -156,6 +188,13 @@ class VideoLoaderApp(ctk.CTk):
         ctk.CTkLabel(frame, text=label, text_color="#8b949e").grid(row=0, column=0, sticky="w")
         entry = ctk.CTkEntry(frame, textvariable=variable, width=76)
         entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+
+    def _apply_header_preset(self, selected: str) -> None:
+        preset = HEADER_PRESETS.get(selected)
+        if not preset:
+            return
+        self.headers_box.delete("1.0", "end")
+        self.headers_box.insert("1.0", preset)
 
     def _show_task_tooltip(self, anchor: ctk.CTkLabel) -> None:
         self._hide_task_tooltip()
