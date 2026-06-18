@@ -20,7 +20,7 @@ python -m video_loader.app
 ## 运行要求
 
 - Python 3.11 或更高版本
-- 合并 HLS、片段列表或 JPEG 图片序列时，需要在 `PATH` 中能找到 `ffmpeg`
+- 合并 HLS、片段列表或 JPEG 图片序列时，需要 `ffmpeg`。如果系统和虚拟环境中都没有找到，程序会提示是否安装到当前 `.venv`。
 - Python 依赖需要安装在项目的 `.venv` 虚拟环境中
 
 macOS 使用 Homebrew 安装 ffmpeg：

@@ -12,7 +12,7 @@ except ImportError as exc:  # pragma: no cover - shown only when dependencies ar
 
 from video_loader.downloaders.manager import DownloadManager, available_modes
 from video_loader.models import DownloadResult, DownloadTask
-from video_loader.services.ffmpeg import find_ffmpeg
+from video_loader.services.ffmpeg import find_ffmpeg, install_ffmpeg_to_venv
 from video_loader.utils import parse_cookies, parse_headers
 
 
@@ -166,12 +166,46 @@ class VideoLoaderApp(ctk.CTk):
             messagebox.showerror("任务无效", str(exc))
             return
 
+        if self._task_needs_ffmpeg(task) and not find_ffmpeg():
+            approved = messagebox.askyesno(
+                "需要安装 ffmpeg",
+                "当前系统和虚拟环境中没有找到 ffmpeg。\n\n"
+                "HLS、片段列表合并和 JPEG 图片序列需要 ffmpeg 才能生成最终视频。\n"
+                "是否安装 ffmpeg 到当前虚拟环境？",
+            )
+            if not approved:
+                self._log("已取消：缺少 ffmpeg，未开始需要合并的下载任务。")
+                return
+            self._start_install_then_download(task)
+            return
+
+        self._start_worker(task)
+
+    def _start_worker(self, task: DownloadTask) -> None:
         self.cancel_event.clear()
         self.progress.set(0)
         self._set_running(True)
         self._log("开始下载...")
         self.worker = threading.Thread(target=self._run_download, args=(task,), daemon=True)
         self.worker.start()
+
+    def _start_install_then_download(self, task: DownloadTask) -> None:
+        self.cancel_event.clear()
+        self.progress.set(0)
+        self._set_running(True)
+        self._log("开始安装 ffmpeg...")
+        self.worker = threading.Thread(target=self._install_then_run_download, args=(task,), daemon=True)
+        self.worker.start()
+
+    def _install_then_run_download(self, task: DownloadTask) -> None:
+        try:
+            install_ffmpeg_to_venv(self._queue_log)
+        except Exception as exc:
+            self.events.put(("install_error", str(exc)))
+            return
+        self.events.put(("ffmpeg_status", None))
+        self._queue_log("ffmpeg 准备完成，开始下载...")
+        self._run_download(task)
 
     def _build_task(self) -> DownloadTask:
         url = self.url_box.get("1.0", "end").strip()
@@ -204,6 +238,9 @@ class VideoLoaderApp(ctk.CTk):
         result = self.manager.download(task, self._queue_progress, self._queue_log, self.cancel_event)
         self.events.put(("result", result))
 
+    def _task_needs_ffmpeg(self, task: DownloadTask) -> bool:
+        return task.mode in {"hls", "jpeg_sequence"} or (task.mode == "segment_list" and task.combine_segments)
+
     def _cancel_download(self) -> None:
         self.cancel_event.set()
         self._log("正在取消...")
@@ -227,6 +264,10 @@ class VideoLoaderApp(ctk.CTk):
                         self._log(str(message))
                 elif kind == "result":
                     self._handle_result(payload)  # type: ignore[arg-type]
+                elif kind == "install_error":
+                    self._handle_install_error(str(payload))
+                elif kind == "ffmpeg_status":
+                    self.status_var.set(self._ffmpeg_status())
         except queue.Empty:
             pass
         self.after(100, self._poll_events)
@@ -240,6 +281,12 @@ class VideoLoaderApp(ctk.CTk):
             for error in result.errors:
                 self._log(f"错误：{error}")
         self._set_running(False)
+
+    def _handle_install_error(self, message: str) -> None:
+        self._log(f"ffmpeg 安装失败：{message}")
+        self.status_var.set(self._ffmpeg_status())
+        self._set_running(False)
+        messagebox.showerror("ffmpeg 安装失败", message)
 
     def _set_running(self, running: bool) -> None:
         self.start_button.configure(state="disabled" if running else "normal")
