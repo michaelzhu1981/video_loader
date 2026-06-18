@@ -48,7 +48,7 @@ class VideoLoaderApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("视频下载器")
-        self.geometry("1120x900")
+        self.geometry("1120x980")
         self.minsize(980, 720)
 
         self.manager = DownloadManager()
