@@ -18,6 +18,13 @@ from video_loader.utils import parse_cookies, parse_headers
 
 MODE_LABELS = available_modes()
 LABEL_TO_MODE = {label: mode for mode, label in MODE_LABELS.items()}
+MODE_DESCRIPTIONS = {
+    "direct": "直链文件：下载单个文件 URL，适合 mp4、zip 等可直接访问的资源。",
+    "hls": "HLS / m3u8：解析播放列表并下载媒体片段，完成后用 ffmpeg 合并成视频。",
+    "segment_list": "片段列表：在输入框中按行粘贴多个片段 URL，可选择只保存片段或合并。",
+    "jpeg_sequence": "JPEG 图片序列：下载播放列表中的 jpg/jpeg 图片片段，并合并为视频。",
+}
+TASK_TOOLTIP = "\n".join(MODE_DESCRIPTIONS.values())
 
 
 class VideoLoaderApp(ctk.CTk):
@@ -35,6 +42,7 @@ class VideoLoaderApp(ctk.CTk):
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.cancel_event = threading.Event()
         self.worker: threading.Thread | None = None
+        self.task_tooltip: ctk.CTkToplevel | None = None
 
         self.mode_var = ctk.StringVar(value=MODE_LABELS["hls"])
         self.output_dir_var = ctk.StringVar(value=str(Path.cwd() / "downloads"))
@@ -78,8 +86,23 @@ class VideoLoaderApp(ctk.CTk):
         panel.grid(row=1, column=0, sticky="nsew", padx=(18, 10), pady=18)
         panel.grid_columnconfigure(0, weight=1)
 
-        section = ctk.CTkLabel(panel, text="下载任务", font=ctk.CTkFont(size=16, weight="bold"))
-        section.grid(row=0, column=0, sticky="w", padx=18, pady=(18, 8))
+        section_row = ctk.CTkFrame(panel, fg_color="transparent")
+        section_row.grid(row=0, column=0, sticky="w", padx=18, pady=(18, 8))
+        section = ctk.CTkLabel(section_row, text="下载任务", font=ctk.CTkFont(size=16, weight="bold"))
+        section.grid(row=0, column=0, sticky="w")
+        help_icon = ctk.CTkLabel(
+            section_row,
+            text="?",
+            width=22,
+            height=22,
+            corner_radius=11,
+            fg_color="#30363d",
+            text_color="#c9d1d9",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        help_icon.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        help_icon.bind("<Enter>", lambda _event: self._show_task_tooltip(help_icon))
+        help_icon.bind("<Leave>", lambda _event: self._hide_task_tooltip())
 
         self.mode_menu = ctk.CTkOptionMenu(panel, values=list(LABEL_TO_MODE.keys()), variable=self.mode_var)
         self.mode_menu.grid(row=1, column=0, sticky="ew", padx=18, pady=6)
@@ -133,6 +156,34 @@ class VideoLoaderApp(ctk.CTk):
         ctk.CTkLabel(frame, text=label, text_color="#8b949e").grid(row=0, column=0, sticky="w")
         entry = ctk.CTkEntry(frame, textvariable=variable, width=76)
         entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+
+    def _show_task_tooltip(self, anchor: ctk.CTkLabel) -> None:
+        self._hide_task_tooltip()
+
+        tooltip = ctk.CTkToplevel(self)
+        tooltip.overrideredirect(True)
+        tooltip.attributes("-topmost", True)
+
+        frame = ctk.CTkFrame(tooltip, fg_color="#161b22", border_width=1, border_color="#30363d", corner_radius=8)
+        frame.grid(row=0, column=0)
+        ctk.CTkLabel(
+            frame,
+            text=TASK_TOOLTIP,
+            text_color="#c9d1d9",
+            justify="left",
+            anchor="w",
+            wraplength=360,
+        ).grid(row=0, column=0, padx=12, pady=10)
+
+        x = anchor.winfo_rootx() + anchor.winfo_width() + 8
+        y = anchor.winfo_rooty() - 4
+        tooltip.geometry(f"+{x}+{y}")
+        self.task_tooltip = tooltip
+
+    def _hide_task_tooltip(self) -> None:
+        if self.task_tooltip is not None:
+            self.task_tooltip.destroy()
+            self.task_tooltip = None
 
     def _build_log_panel(self) -> None:
         panel = ctk.CTkFrame(self, fg_color="#0d1117", corner_radius=10)
