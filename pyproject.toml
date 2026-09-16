@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "video-loader"
 version = "0.1.0"
-description = "一个支持直链、HLS、片段列表和 JPEG 图片序列的现代桌面下载工具。"
+description = "一个支持直链、HLS、片段列表、JPEG 图片序列和磁力链接的现代桌面下载工具。"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

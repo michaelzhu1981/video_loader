@@ -12,17 +12,20 @@ except ImportError as exc:  # pragma: no cover - shown only when dependencies ar
 
 from video_loader.downloaders.manager import DownloadManager, available_modes
 from video_loader.models import DownloadResult, DownloadTask
+from video_loader.services.aria2 import find_aria2c, install_aria2c_to_venv
 from video_loader.services.ffmpeg import find_ffmpeg, install_ffmpeg_to_venv
 from video_loader.utils import parse_cookies, parse_headers
 
 
 MODE_LABELS = available_modes()
 LABEL_TO_MODE = {label: mode for mode, label in MODE_LABELS.items()}
+MAGNET_LABEL = MODE_LABELS["magnet"]
 MODE_DESCRIPTIONS = {
     "direct": "直链文件：下载单个文件 URL，适合 mp4、zip 等可直接访问的资源。",
     "hls": "HLS / m3u8：解析播放列表并下载媒体片段，完成后用 ffmpeg 合并成视频。",
     "segment_list": "片段列表：在输入框中按行粘贴多个片段 URL，可选择只保存片段或合并。",
     "jpeg_sequence": "JPEG 图片序列：下载播放列表中的 jpg/jpeg 图片片段，并合并为视频。",
+    "magnet": "磁力链接：每行粘贴一个 magnet:? 链接，通过内置 aria2 下载 BitTorrent 资源。",
 }
 TASK_TOOLTIP = "\n".join(MODE_DESCRIPTIONS.values())
 HEADER_PRESETS = {
@@ -118,7 +121,12 @@ class VideoLoaderApp(ctk.CTk):
         help_icon.bind("<Enter>", lambda _event: self._show_task_tooltip(help_icon))
         help_icon.bind("<Leave>", lambda _event: self._hide_task_tooltip())
 
-        self.mode_menu = ctk.CTkOptionMenu(panel, values=list(LABEL_TO_MODE.keys()), variable=self.mode_var)
+        self.mode_menu = ctk.CTkOptionMenu(
+            panel,
+            values=list(LABEL_TO_MODE.keys()),
+            variable=self.mode_var,
+            command=self._on_mode_change,
+        )
         self.mode_menu.grid(row=1, column=0, sticky="ew", padx=18, pady=6)
 
         self.url_box = ctk.CTkTextbox(panel, height=120, fg_color="#0d1117", border_width=1, border_color="#30363d")
@@ -196,6 +204,18 @@ class VideoLoaderApp(ctk.CTk):
         self.headers_box.delete("1.0", "end")
         self.headers_box.insert("1.0", preset)
 
+    def _on_mode_change(self, _selected: str) -> None:
+        if self.mode_var.get() == MAGNET_LABEL:
+            current = self.url_box.get("1.0", "end").strip()
+            if not current or not current.startswith("magnet:"):
+                self.url_box.delete("1.0", "end")
+                # 以 # 开头的是注释行，下载时会忽略，避免误把提示文字当成链接提交
+                self.url_box.insert(
+                    "1.0",
+                    "# 每行一个磁力链接，例如：\n"
+                    "# magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\n",
+                )
+
     def _show_task_tooltip(self, anchor: ctk.CTkLabel) -> None:
         self._hide_task_tooltip()
 
@@ -269,6 +289,19 @@ class VideoLoaderApp(ctk.CTk):
             self._start_install_then_download(task)
             return
 
+        if task.mode == "magnet" and not find_aria2c():
+            approved = messagebox.askyesno(
+                "需要安装 aria2",
+                "当前系统和虚拟环境中没有找到 aria2。\n\n"
+                "磁力链接下载需要 aria2 提供 BitTorrent 支持（macOS 可通过 Homebrew 安装）。\n"
+                "是否现在安装 aria2？",
+            )
+            if not approved:
+                self._log("已取消：缺少 aria2，未开始磁力链接下载任务。")
+                return
+            self._start_install_aria2_then_download(task)
+            return
+
         self._start_worker(task)
 
     def _start_worker(self, task: DownloadTask) -> None:
@@ -291,10 +324,28 @@ class VideoLoaderApp(ctk.CTk):
         try:
             install_ffmpeg_to_venv(self._queue_log)
         except Exception as exc:
-            self.events.put(("install_error", str(exc)))
+            self.events.put(("install_error", ("ffmpeg", str(exc))))
             return
         self.events.put(("ffmpeg_status", None))
         self._queue_log("ffmpeg 准备完成，开始下载...")
+        self._run_download(task)
+
+    def _start_install_aria2_then_download(self, task: DownloadTask) -> None:
+        self.cancel_event.clear()
+        self.progress.set(0)
+        self._set_running(True)
+        self._log("开始安装 aria2...")
+        self.worker = threading.Thread(target=self._install_aria2_then_run_download, args=(task,), daemon=True)
+        self.worker.start()
+
+    def _install_aria2_then_run_download(self, task: DownloadTask) -> None:
+        try:
+            install_aria2c_to_venv(self._queue_log)
+        except Exception as exc:
+            self.events.put(("install_error", ("aria2", str(exc))))
+            return
+        self.events.put(("aria2_status", None))
+        self._queue_log("aria2 准备完成，开始下载...")
         self._run_download(task)
 
     def _build_task(self) -> DownloadTask:
@@ -355,8 +406,11 @@ class VideoLoaderApp(ctk.CTk):
                 elif kind == "result":
                     self._handle_result(payload)  # type: ignore[arg-type]
                 elif kind == "install_error":
-                    self._handle_install_error(str(payload))
+                    tool, message = payload  # type: ignore[misc]
+                    self._handle_install_error(str(tool), str(message))
                 elif kind == "ffmpeg_status":
+                    self.status_var.set(self._ffmpeg_status())
+                elif kind == "aria2_status":
                     self.status_var.set(self._ffmpeg_status())
         except queue.Empty:
             pass
@@ -372,11 +426,11 @@ class VideoLoaderApp(ctk.CTk):
                 self._log(f"错误：{error}")
         self._set_running(False)
 
-    def _handle_install_error(self, message: str) -> None:
-        self._log(f"ffmpeg 安装失败：{message}")
+    def _handle_install_error(self, tool: str, message: str) -> None:
+        self._log(f"{tool} 安装失败：{message}")
         self.status_var.set(self._ffmpeg_status())
         self._set_running(False)
-        messagebox.showerror("ffmpeg 安装失败", message)
+        messagebox.showerror(f"{tool} 安装失败", message)
 
     def _set_running(self, running: bool) -> None:
         self.start_button.configure(state="disabled" if running else "normal")
@@ -388,7 +442,8 @@ class VideoLoaderApp(ctk.CTk):
 
     def _ffmpeg_status(self) -> str:
         ffmpeg = find_ffmpeg()
-        return f"通用桌面下载工具 - ffmpeg：{ffmpeg or '未找到'}"
+        aria2 = find_aria2c()
+        return f"通用桌面下载工具 - ffmpeg：{ffmpeg or '未找到'}  aria2：{aria2 or '未找到'}"
 
 
 def main() -> None:

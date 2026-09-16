@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 
-DownloadMode = Literal["direct", "hls", "segment_list", "jpeg_sequence"]
+DownloadMode = Literal["direct", "hls", "segment_list", "jpeg_sequence", "magnet"]
 ProgressCallback = Callable[[float, str], None]
 LogCallback = Callable[[str], None]
 
