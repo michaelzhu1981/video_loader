@@ -2,6 +2,9 @@
 
 这里的服务器真的实现 `Range: bytes=N-`（206/416），所以"续传有没有生效"是服务端看到的事实：
 请求里有没有 Range、实际传了多少字节、最终文件内容对不对，都逐条断言。
+
+最后一组用例管的是这件事的另一半：**合并成功就删片段**——所以"片段还在"只可能来自没合并成功的
+运行（取消 / ffmpeg 报错），那正是下次续传要用的东西。
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from video_loader.downloaders.base import download_one, part_path  # noqa: E402
 from video_loader.downloaders.hls import HlsDownloader  # noqa: E402
+from video_loader.downloaders.jpeg_sequence import JpegSequenceDownloader  # noqa: E402
 from video_loader.downloaders.segment_list import SegmentListDownloader  # noqa: E402
 from video_loader.models import DownloadTask  # noqa: E402
 from video_loader.services import http_client  # noqa: E402
@@ -345,6 +349,121 @@ class SegmentReuseTests(unittest.TestCase):
         merged = result.output_path
         assert merged is not None
         self.assertEqual(merged.read_bytes(), b"".join(self.body[f"seg{i}.ts"] for i in range(self.count)))
+
+
+class SegmentCleanupTests(unittest.TestCase):
+    """合并成功后删片段：片段只在"这次没合并成"时才留在磁盘上，供下次续传复用。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.count = 4
+        self.body = {f"seg{i}.ts": payload(i) for i in range(self.count)}
+        self.payloads = dict(self.body)
+        self.payloads["list.m3u8"] = m3u8([f"seg{i}.ts" for i in range(self.count)])
+
+    def _segments(self, out: Path) -> list[Path]:
+        return sorted((out / "_segments").glob("segment-*"))
+
+    def _hls_task(self, server: _RangeServer, out: Path) -> DownloadTask:
+        return DownloadTask(url=server.url("list.m3u8"), mode="hls", output_dir=out, concurrency=2, retries=0)
+
+    def _run_hls(self, out: Path, combine=fake_combine, logs: list[str] | None = None):
+        with _RangeServer(self.payloads) as server:
+            task = self._hls_task(server, out)
+            with mock.patch("video_loader.downloaders.hls.combine_with_concat_demuxer", combine):
+                return HlsDownloader().download(task, lambda *_a: None, (logs if logs is not None else []).append, Event())
+
+    def test_segments_are_deleted_after_successful_merge(self) -> None:
+        out = self.root / "hls"
+        logs: list[str] = []
+        result = self._run_hls(out, logs=logs)
+
+        self.assertTrue(result.success, result.errors)
+        merged = result.output_path
+        assert merged is not None
+        self.assertEqual(merged.read_bytes(), b"".join(self.body[f"seg{i}.ts"] for i in range(self.count)))
+        self.assertEqual(self._segments(out), [], "视频已经合并好了，片段不该留在磁盘上")
+        self.assertFalse((out / "_segments").exists(), "空掉的 _segments 目录也该收走")
+        self.assertTrue(any("片段文件" in line for line in logs), logs)
+
+    def test_segments_survive_failed_merge_and_are_reused_next_run(self) -> None:
+        out = self.root / "failed"
+
+        def failing_combine(_files: list[Path], _output: Path, _log: object = None) -> Path:
+            raise RuntimeError("ffmpeg 执行失败，退出码：1")
+
+        result = self._run_hls(out, combine=failing_combine)
+        self.assertFalse(result.success, "合并失败就不该报成功")
+        self.assertEqual(len(self._segments(out)), self.count, "合并没成功，片段必须留着")
+
+        with _RangeServer(self.payloads) as server:
+            task = self._hls_task(server, out)
+            with mock.patch("video_loader.downloaders.hls.combine_with_concat_demuxer", fake_combine):
+                retried = HlsDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
+            self.assertTrue(retried.success, retried.errors)
+            for index in range(self.count):
+                self.assertEqual(server.sent_bytes[f"seg{index}.ts"], 0, f"seg{index} 应该被复用而不是重下")
+
+    def test_segments_survive_empty_merge_output(self) -> None:
+        out = self.root / "empty"
+
+        def empty_combine(_files: list[Path], output_path: Path, _log: object = None) -> Path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"")
+            return output_path
+
+        result = self._run_hls(out, combine=empty_combine)
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(len(self._segments(out)), self.count, "合并产物是空的：片段是仅存的数据，不能删")
+
+    def test_segment_list_keeps_segments_when_combine_is_off(self) -> None:
+        out = self.root / "raw"
+        with _RangeServer(self.payloads) as server:
+            task = DownloadTask(
+                url="\n".join(server.url(f"seg{i}.ts") for i in range(self.count)),
+                mode="segment_list",
+                output_dir=out,
+                concurrency=2,
+                combine_segments=False,
+                retries=0,
+            )
+            result = SegmentListDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
+
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(len(self._segments(out)), self.count, "不合并时片段本身就是产物，不能删")
+        self.assertEqual(result.output_path, out / "_segments")
+
+    def test_jpeg_frames_are_deleted_after_successful_merge(self) -> None:
+        out = self.root / "jpeg"
+        payloads = {f"pic{i}.jpeg": payload(i) for i in range(3)}
+        payloads["pics.m3u8"] = m3u8([f"pic{i}.jpeg" for i in range(3)])
+        with _RangeServer(payloads) as server:
+            task = DownloadTask(url=server.url("pics.m3u8"), mode="jpeg_sequence", output_dir=out, concurrency=2, retries=0)
+            with mock.patch("video_loader.downloaders.jpeg_sequence.combine_with_concat_protocol", fake_combine):
+                result = JpegSequenceDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
+
+        self.assertTrue(result.success, result.errors)
+        merged = result.output_path
+        assert merged is not None
+        self.assertEqual(merged.read_bytes(), b"".join(payloads[f"pic{i}.jpeg"] for i in range(3)))
+        self.assertEqual(sorted(path.name for path in out.glob("Video*")), [], "合并后的 JPEG 片段也该删")
+
+    def test_second_run_after_successful_merge_downloads_again(self) -> None:
+        """代价也写在用例里：片段清掉之后重跑同一个任务不再复用，而是整份重下、另存一份。"""
+        out = self.root / "again"
+        self.assertTrue(self._run_hls(out).success)
+        with _RangeServer(self.payloads) as server:
+            task = self._hls_task(server, out)
+            with mock.patch("video_loader.downloaders.hls.combine_with_concat_demuxer", fake_combine):
+                second = HlsDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
+            self.assertTrue(second.success, second.errors)
+            merged = second.output_path
+            assert merged is not None
+            self.assertEqual(merged.name, "video-1.mp4", "不该覆盖上一次的合并结果")
+            for index in range(self.count):
+                self.assertEqual(server.sent_bytes[f"seg{index}.ts"], len(self.body[f"seg{index}.ts"]))
 
 
 if __name__ == "__main__":

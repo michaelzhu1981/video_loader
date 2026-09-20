@@ -4,7 +4,7 @@ from pathlib import Path
 from threading import Event
 from urllib.parse import urljoin, urlparse
 
-from video_loader.downloaders.base import download_many, request_with_retries
+from video_loader.downloaders.base import cleanup_segments, download_many, request_with_retries
 from video_loader.services.http_client import build_session
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
 from video_loader.services.ffmpeg import combine_with_concat_demuxer
@@ -73,6 +73,7 @@ class HlsDownloader:
                 output_name = f"{output_name}.mp4"
             output_path = unique_path(task.output_dir / output_name)
             combine_with_concat_demuxer(files, output_path, log_callback)
+            cleanup_segments(files, output_path, log_callback)
             progress_callback(1.0, "HLS 下载完成")
             return DownloadResult(True, output_path, f"已保存到 {output_path}")
         except Exception as exc:

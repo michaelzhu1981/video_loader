@@ -147,11 +147,12 @@ def _expected_total(response: requests.Response, offset: int) -> int:
     return offset + length if length else 0
 
 
-def _discard(path: Path) -> None:
+def _discard(path: Path) -> bool:
     try:
         path.unlink()
     except OSError:
-        pass
+        return False
+    return True
 
 
 def _plan_resume(
@@ -424,3 +425,26 @@ def download_many(
                 pass
 
     return [path for path in files if path is not None]
+
+
+def cleanup_segments(files: Sequence[Path], merged: Path, log_callback: LogCallback) -> None:
+    """合并成功后清掉已经没用的片段：删文件，顺手收走空掉的片段目录。
+
+    只在合并产物真有内容时才删：ffmpeg 偶发地退出码 0 却没写出东西时，片段是仅存的那份数据。
+    片段目录只在空的时候删得掉——合并失败或取消留下的半截 `.part` 会让它留着，下次续传接着用。
+    """
+    if not files:
+        return
+    if file_size(merged) == 0:
+        log_callback("合并产物为空，已保留下载好的片段。")
+        return
+
+    removed = sum(1 for path in files if _discard(path))
+    if not removed:
+        return
+    for directory in {path.parent for path in files}:
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # 目录里还有别的东西（例如半截的 .part），留着
+    log_callback(f"已删除 {removed} 个片段文件（视频已合并）。")

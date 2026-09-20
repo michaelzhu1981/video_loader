@@ -231,7 +231,10 @@ class JpegSequenceConcurrencyTests(unittest.TestCase):
                 result = JpegSequenceDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
             self.assertTrue(result.success, result.errors)
             self.assertGreaterEqual(server.max_active, 2, f"并发数=3 却只有 {server.max_active} 个请求同时在跑")
-            self.assertEqual(sorted(path.name for path in out.glob("Video*")), [f"Video{i}.jpeg" for i in range(6)])
+            merged = result.output_path
+            assert merged is not None
+            self.assertEqual(merged.read_bytes(), JPEG_PAYLOAD * 6, "6 张图必须按顺序全部下到")
+            self.assertEqual(list(out.glob("Video*")), [], "合并成功后片段文件应被删掉")
 
 
 class HlsSessionReuseTests(unittest.TestCase):

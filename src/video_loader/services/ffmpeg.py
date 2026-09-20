@@ -86,13 +86,18 @@ def install_ffmpeg_to_venv(log_callback: Callable[[str], None] | None = None) ->
     return str(target)
 
 
+def concat_list_path(output_path: Path) -> Path:
+    """ffmpeg concat 解复用器要读的片段清单放在哪（和输出同目录，例如 video.concat.txt）。"""
+    return output_path.with_suffix(".concat.txt")
+
+
 def combine_with_concat_demuxer(files: list[Path], output_path: Path, log_callback) -> Path:
     if not files:
         raise ValueError("没有可合并的片段文件。")
 
     ffmpeg = require_ffmpeg()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    list_path = output_path.with_suffix(".concat.txt")
+    list_path = concat_list_path(output_path)
     list_content = "\n".join(f"file '{str(path).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for path in files)
     list_path.write_text(list_content + "\n", encoding="utf-8")
 
@@ -109,7 +114,12 @@ def combine_with_concat_demuxer(files: list[Path], output_path: Path, log_callba
         "copy",
         str(output_path),
     ]
-    return _run_ffmpeg(command, output_path, log_callback)
+    try:
+        return _run_ffmpeg(command, output_path, log_callback)
+    finally:
+        # 这份清单只在 ffmpeg 运行期间有用，而且里面记的正是合并后就要被删掉的片段路径：
+        # 留着只会误导（照它去找文件已经找不到了），所以不管成败都不留。
+        list_path.unlink(missing_ok=True)
 
 
 def combine_with_concat_protocol(files: list[Path], output_path: Path, log_callback) -> Path:
