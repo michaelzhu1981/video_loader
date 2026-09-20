@@ -4,7 +4,7 @@ from pathlib import Path
 from threading import Event
 from urllib.parse import urlparse
 
-from video_loader.downloaders.base import download_file, request_with_retries
+from video_loader.downloaders.base import download_many, request_with_retries
 from video_loader.downloaders.hls import parse_m3u8_segments
 from video_loader.services.http_client import build_session
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
@@ -30,14 +30,18 @@ class JpegSequenceDownloader:
                     raise RuntimeError("播放列表中没有找到 JPEG 片段。")
                 log_callback(f"找到 {len(segments)} 个 JPEG 片段。")
 
-                files: list[Path] = []
-                for index, url in enumerate(segments):
-                    if cancel_event.is_set():
-                        raise RuntimeError("下载已取消")
-                    suffix = Path(urlparse(url).path).suffix or ".jpeg"
-                    path = task.output_dir / f"Video{index}{suffix}"
-                    files.append(download_file(session, url, path, task, log_callback, cancel_event))
-                    progress_callback((index + 1) / len(segments) * 0.9, f"已下载 {index + 1}/{len(segments)}")
+                files = download_many(
+                    [
+                        (url, task.output_dir / f"Video{index}{Path(urlparse(url).path).suffix or '.jpeg'}")
+                        for index, url in enumerate(segments)
+                    ],
+                    task,
+                    log_callback,
+                    cancel_event,
+                    progress_callback,
+                    progress_span=0.9,
+                    label="JPEG 片段",
+                )
 
             output_name = safe_filename(task.output_name, "video.mp4") if task.output_name else "video.mp4"
             if not Path(output_name).suffix:

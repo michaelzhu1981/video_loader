@@ -111,16 +111,22 @@ class SniffModeHintTests(unittest.TestCase):
 class _StubTaskApp:
     """构造 DownloadTask 所需的最小控件集合（不创建 Tk 窗口）。"""
 
+    # 数字框解析是纯函数，直接借真方法，避免 stub 和界面逻辑走偏
+    _number_field_value = staticmethod(app_module.VideoLoaderApp._number_field_value)
+
     def __init__(self, mode_label: str, url: str, quality: str = "", choices: list | None = None) -> None:
         self.mode_var = _StubVar(mode_label)
         self.url_box = _StubBox(url)
         self.output_dir_var = _StubVar("/tmp/video-loader-test")
         self.output_name_var = _StubVar("video.mp4")
-        self.concurrency_var = _StubVar(4)
-        self.timeout_var = _StubVar(30)
-        self.retries_var = _StubVar(2)
+        # 界面上数字框绑的是 StringVar（customtkinter 的 Entry 回调会对 IntVar 取 int 而炸）
+        self.concurrency_var = _StubVar("4")
+        self.timeout_var = _StubVar("30")
+        self.retries_var = _StubVar("2")
         self.verify_ssl_var = _StubVar(True)
         self.combine_var = _StubVar(True)
+        self.resume_var = _StubVar(True)
+        self.resume_var = _StubVar(True)
         self.impersonate_var = _StubVar(True)
         self.browser_var = _StubVar(False)
         self.quality_var = _StubVar(quality)

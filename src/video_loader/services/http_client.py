@@ -36,6 +36,12 @@ def curl_cffi_available() -> bool:
     return True
 
 
+def uses_curl_cffi(session: HttpSession) -> bool:
+    """会话底层是不是 curl_cffi（决定能不能用 content_callback 边下边写）。"""
+    inner = getattr(session, "inner", session)
+    return type(inner).__module__.split(".")[0] == "curl_cffi"
+
+
 def transport_label() -> str:
     """给界面状态栏用的一行说明。"""
     if curl_cffi_available():

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Event
 from urllib.parse import urljoin, urlparse
 
-from video_loader.downloaders.base import download_file, request_with_retries
+from video_loader.downloaders.base import download_many, request_with_retries
 from video_loader.services.http_client import build_session
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
 from video_loader.services.ffmpeg import combine_with_concat_demuxer
@@ -55,7 +54,19 @@ class HlsDownloader:
 
                 log_callback(f"找到 {len(segments)} 个播放列表片段。")
                 segment_dir = task.output_dir / "_segments"
-                files = self._download_segments(segments, segment_dir, task, progress_callback, log_callback, cancel_event)
+                segment_dir.mkdir(parents=True, exist_ok=True)
+                files = download_many(
+                    [
+                        (url, segment_dir / f"segment-{index:05d}{Path(urlparse(url).path).suffix or '.bin'}")
+                        for index, url in enumerate(segments)
+                    ],
+                    task,
+                    log_callback,
+                    cancel_event,
+                    progress_callback,
+                    progress_span=0.9,
+                    label="分片",
+                )
 
             output_name = safe_filename(task.output_name, "video.mp4") if task.output_name else "video.mp4"
             if not Path(output_name).suffix:
@@ -66,37 +77,3 @@ class HlsDownloader:
             return DownloadResult(True, output_path, f"已保存到 {output_path}")
         except Exception as exc:
             return DownloadResult(False, None, "HLS 下载失败", [str(exc)])
-
-    def _download_segments(
-        self,
-        segments: list[str],
-        segment_dir: Path,
-        task: DownloadTask,
-        progress_callback: ProgressCallback,
-        log_callback: LogCallback,
-        cancel_event: Event,
-    ) -> list[Path]:
-        segment_dir.mkdir(parents=True, exist_ok=True)
-        completed = 0
-        files: list[Path | None] = [None] * len(segments)
-
-        def fetch(index: int, url: str) -> tuple[int, Path]:
-            if cancel_event.is_set():
-                raise RuntimeError("下载已取消")
-            suffix = Path(urlparse(url).path).suffix or ".bin"
-            name = f"segment-{index:05d}{suffix}"
-            with build_session(task) as worker_session:
-                return index, download_file(worker_session, url, segment_dir / name, task, log_callback, cancel_event)
-
-        workers = max(1, min(task.concurrency, 16))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(fetch, index, url) for index, url in enumerate(segments)]
-            for future in as_completed(futures):
-                if cancel_event.is_set():
-                    raise RuntimeError("下载已取消")
-                index, path = future.result()
-                files[index] = path
-                completed += 1
-                progress_callback(completed / max(len(segments), 1) * 0.9, f"已下载 {completed}/{len(segments)}")
-
-        return [path for path in files if path is not None]

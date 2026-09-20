@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from threading import Event
 
-from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
+from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback, worker_count
 from video_loader.services.aria2 import Aria2Session, wait_for_gid
 from video_loader.utils import safe_filename, unique_path
 
@@ -62,7 +62,7 @@ class MagnetDownloader:
                     # 先做本地校验，否则错误要等 aria2 报 "No URI to download." 才暴露
                     return DownloadResult(False, None, "磁力链接下载失败", [problem])
 
-            session = Aria2Session(task.output_dir, log_callback)
+            session = Aria2Session(task.output_dir, log_callback, max_concurrent_downloads=worker_count(task.concurrency))
             try:
                 session.start()
                 gids: list[str] = []

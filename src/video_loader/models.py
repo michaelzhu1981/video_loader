@@ -9,6 +9,19 @@ DownloadMode = Literal["direct", "hls", "segment_list", "jpeg_sequence", "magnet
 ProgressCallback = Callable[[float, str], None]
 LogCallback = Callable[[str], None]
 
+# 界面上的「并发数」上限。再往上加只会打爆对端 CDN 和本机连接数（实测 4~8 已能吃满带宽），
+# 所以界面、分片下载线程池、aria2 三处统一用同一个上限。
+MAX_CONCURRENCY = 16
+
+
+def worker_count(concurrency: object) -> int:
+    """把界面上的并发数收敛成实际会用到的线程数。"""
+    try:
+        value = int(concurrency)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(value, MAX_CONCURRENCY))
+
 
 class HttpSession(Protocol):
     """requests.Session 与 curl_cffi Session 的公共接口（两者细节签名不同，按鸭子类型处理）。"""
@@ -39,6 +52,9 @@ class DownloadTask:
     retries: int = 2
     verify_ssl: bool = True
     combine_segments: bool = True
+    # 断点续传：进行中的分片写 <名字>.part，完整下完才改名；重跑同一个任务时复用已下好的分片，
+    # 半截文件用 Range 接着下。关掉就是每次全新下载（落到新名字上，不覆盖已有文件）。
+    resume: bool = True
     # 浏览器指纹伪装（curl_cffi）：Cloudflare 等按 TLS/HTTP2 指纹拦截的站点需要开启。
     impersonate: bool = True
     # 页面源码里找不到 m3u8 时，是否允许启动本机 Chrome 抓包。

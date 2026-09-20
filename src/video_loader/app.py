@@ -11,7 +11,15 @@ except ImportError as exc:  # pragma: no cover - shown only when dependencies ar
     raise SystemExit("缺少依赖：请先运行 `pip install -r requirements.txt`。") from exc
 
 from video_loader.downloaders.manager import DownloadManager, available_modes
-from video_loader.models import DownloadResult, DownloadTask, SniffResult, StreamVariant
+from video_loader.models import MAX_CONCURRENCY, DownloadResult, DownloadTask, SniffResult, StreamVariant, worker_count
+from video_loader.services.app_log import (
+    ignore_sighup,
+    install_exception_logging,
+    install_signal_logging,
+    log_line,
+    log_shutdown,
+    log_startup,
+)
 from video_loader.services.aria2 import find_aria2c, install_aria2c_to_venv
 from video_loader.services.browser_capture import browser_available
 from video_loader.services.ffmpeg import find_ffmpeg, install_ffmpeg_to_venv
@@ -45,6 +53,8 @@ HEADER_PRESETS = {
     "HLS / m3u8": "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
     "带来源 Referer": "Referer: https://example.com/\nOrigin: https://example.com",
 }
+# 心跳：日志里长时间没有心跳又没有"退出"行，就说明进程是被信号杀掉的（不是自己退出）。
+HEARTBEAT_SECONDS = 60
 HEADER_HINT = (
     "请求头格式：每行一个。留空 User-Agent 时会用指纹伪装的 Chrome UA（推荐）；"
     "写 Mozilla/5.0 这类占位 UA 会被 Cloudflare 直接 403。\n"
@@ -78,11 +88,14 @@ class VideoLoaderApp(ctk.CTk):
         self.mode_var = ctk.StringVar(value=MODE_LABELS["hls"])
         self.output_dir_var = ctk.StringVar(value=str(Path.cwd() / "downloads"))
         self.output_name_var = ctk.StringVar(value="video.mp4")
-        self.concurrency_var = ctk.IntVar(value=4)
-        self.timeout_var = ctk.IntVar(value=30)
-        self.retries_var = ctk.IntVar(value=2)
+        # 数字输入框必须用 StringVar：customtkinter 的 Entry 回调会对变量取 int，
+        # 用 IntVar 时用户一清空输入框就抛 _tkinter.TclError: expected floating-point number but got ""。
+        self.concurrency_var = ctk.StringVar(value="4")
+        self.timeout_var = ctk.StringVar(value="30")
+        self.retries_var = ctk.StringVar(value="2")
         self.verify_ssl_var = ctk.BooleanVar(value=True)
         self.combine_var = ctk.BooleanVar(value=True)
+        self.resume_var = ctk.BooleanVar(value=True)
         self.impersonate_var = ctk.BooleanVar(value=True)
         self.browser_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value=self._ffmpeg_status())
@@ -91,6 +104,8 @@ class VideoLoaderApp(ctk.CTk):
         self.quality_choices: list[tuple[str, StreamVariant]] = []
         self.parsing = False
 
+        install_exception_logging(self, self._log)
+        self.after(HEARTBEAT_SECONDS * 1000, self._heartbeat)
         self._configure_grid()
         self._build_header()
         self._build_config_panel()
@@ -209,10 +224,16 @@ class VideoLoaderApp(ctk.CTk):
             text="源码里没有 m3u8 时启动浏览器抓包",
             variable=self.browser_var,
         )
-        self.use_browser.grid(row=11, column=0, sticky="w", padx=18, pady=(2, 10))
+        self.use_browser.grid(row=11, column=0, sticky="w", padx=18, pady=(2, 2))
+        self.resume = ctk.CTkCheckBox(
+            panel,
+            text="断点续传（复用已下好的分片，半截分片用 Range 接着下）",
+            variable=self.resume_var,
+        )
+        self.resume.grid(row=12, column=0, sticky="w", padx=18, pady=(2, 10))
 
         advanced_row = ctk.CTkFrame(panel, fg_color="transparent")
-        advanced_row.grid(row=12, column=0, sticky="ew", padx=18, pady=(8, 6))
+        advanced_row.grid(row=13, column=0, sticky="ew", padx=18, pady=(8, 6))
         advanced_row.grid_columnconfigure(0, weight=1)
         advanced = ctk.CTkLabel(advanced_row, text="请求头和 Cookie", font=ctk.CTkFont(size=14, weight="bold"))
         advanced.grid(row=0, column=0, sticky="w")
@@ -226,26 +247,26 @@ class VideoLoaderApp(ctk.CTk):
         self.header_preset_menu.grid(row=0, column=1, sticky="e")
 
         ctk.CTkLabel(panel, text=HEADER_HINT, text_color="#8b949e", wraplength=360, justify="left").grid(
-            row=13, column=0, sticky="w", padx=18, pady=(0, 4)
+            row=14, column=0, sticky="w", padx=18, pady=(0, 4)
         )
         self.headers_box = ctk.CTkTextbox(panel, height=76, fg_color="#0d1117", border_width=1, border_color="#30363d")
-        self.headers_box.grid(row=14, column=0, sticky="ew", padx=18, pady=6)
+        self.headers_box.grid(row=15, column=0, sticky="ew", padx=18, pady=6)
         self.headers_box.insert("1.0", HEADER_PRESETS[self.header_preset_var.get()])
         ctk.CTkLabel(panel, text=COOKIE_HINT, text_color="#8b949e", wraplength=360, justify="left").grid(
-            row=15, column=0, sticky="w", padx=18, pady=(2, 4)
+            row=16, column=0, sticky="w", padx=18, pady=(2, 4)
         )
         self.cookies_box = ctk.CTkTextbox(panel, height=60, fg_color="#0d1117", border_width=1, border_color="#30363d")
-        self.cookies_box.grid(row=16, column=0, sticky="ew", padx=18, pady=6)
+        self.cookies_box.grid(row=17, column=0, sticky="ew", padx=18, pady=6)
 
         action_row = ctk.CTkFrame(panel, fg_color="transparent")
-        action_row.grid(row=17, column=0, sticky="ew", padx=18, pady=(14, 18))
+        action_row.grid(row=18, column=0, sticky="ew", padx=18, pady=(14, 18))
         action_row.grid_columnconfigure((0, 1), weight=1)
         self.start_button = ctk.CTkButton(action_row, text="开始", command=self._start_download, fg_color="#238636")
         self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.cancel_button = ctk.CTkButton(action_row, text="取消", command=self._cancel_download, state="disabled", fg_color="#8b3434")
         self.cancel_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
-    def _number_field(self, parent: ctk.CTkFrame, label: str, variable: ctk.IntVar, column: int) -> None:
+    def _number_field(self, parent: ctk.CTkFrame, label: str, variable: ctk.StringVar, column: int) -> None:
         frame = ctk.CTkFrame(parent, fg_color="transparent")
         frame.grid(row=0, column=column, sticky="ew", padx=8, pady=10)
         ctk.CTkLabel(frame, text=label, text_color="#8b949e").grid(row=0, column=0, sticky="w")
@@ -467,9 +488,14 @@ class VideoLoaderApp(ctk.CTk):
         if not output_dir:
             raise ValueError("请选择保存目录。")
 
-        concurrency = max(1, int(self.concurrency_var.get()))
-        timeout = max(1, int(self.timeout_var.get()))
-        retries = max(0, int(self.retries_var.get()))
+        # 数字框改成 StringVar 后必须走 _number_field_value：留空/非法值都给明确提示，
+        # 不再让 int("") 在按钮回调里抛 TclError/ValueError（界面表现为点了没反应）。
+        requested_concurrency = self._number_field_value(self.concurrency_var.get(), "并发数", minimum=1, default=4)
+        concurrency = worker_count(requested_concurrency)
+        if concurrency != requested_concurrency:
+            self._log(f"并发数上限为 {MAX_CONCURRENCY}，本次按 {concurrency} 处理。")
+        timeout = self._number_field_value(self.timeout_var.get(), "超时秒数", minimum=1, default=30)
+        retries = self._number_field_value(self.retries_var.get(), "重试次数", minimum=0, default=2)
 
         mode = LABEL_TO_MODE[self.mode_var.get()]
         if mode == "sniff":
@@ -513,6 +539,7 @@ class VideoLoaderApp(ctk.CTk):
             retries=retries,
             verify_ssl=self.verify_ssl_var.get(),
             combine_segments=self.combine_var.get(),
+            resume=self.resume_var.get(),
             impersonate=self.impersonate_var.get(),
             use_browser=self.browser_var.get(),
             preferred_quality=preferred_quality,
@@ -522,6 +549,18 @@ class VideoLoaderApp(ctk.CTk):
     def _run_download(self, task: DownloadTask) -> None:
         result = self.manager.download(task, self._queue_progress, self._queue_log, self.cancel_event)
         self.events.put(("result", result))
+
+    @staticmethod
+    def _number_field_value(text: str, label: str, *, minimum: int, default: int) -> int:
+        """读取数字输入框：留空用默认值，填了非数字给明确提示。"""
+        value = "" if text is None else str(text).strip()
+        if not value:
+            return default
+        try:
+            number = int(value)
+        except ValueError as exc:
+            raise ValueError(f"「{label}」需要填整数，当前是「{value}」。") from exc
+        return max(minimum, number)
 
     def _task_needs_ffmpeg(self, task: DownloadTask) -> bool:
         return task.mode in {"hls", "jpeg_sequence", "sniff"} or (
@@ -576,6 +615,10 @@ class VideoLoaderApp(ctk.CTk):
             return
         self.parse_button.configure(state="normal", text=PARSE_BUTTON_TEXT)
 
+    def destroy(self) -> None:  # type: ignore[override]
+        log_shutdown("窗口关闭（用户关闭或程序结束）")
+        super().destroy()
+
     def _handle_result(self, result: DownloadResult) -> None:
         if result.success:
             self.progress.set(1)
@@ -600,6 +643,10 @@ class VideoLoaderApp(ctk.CTk):
             text="解析中..." if running else PARSE_BUTTON_TEXT,
         )
 
+    def _heartbeat(self) -> None:
+        log_line("运行中（心跳）")
+        self.after(HEARTBEAT_SECONDS * 1000, self._heartbeat)
+
     def _log(self, message: str) -> None:
         self.log_box.insert("end", f"{message}\n")
         self.log_box.see("end")
@@ -615,8 +662,18 @@ class VideoLoaderApp(ctk.CTk):
 
 
 def main() -> None:
+    log_startup()
+    install_signal_logging()
     app = VideoLoaderApp()
-    app.mainloop()
+    # 放在 mainloop 之前：Tk 会自己接管 SIGHUP 并静默 exit(1)，必须在这里设成忽略
+    ignore_sighup()
+    try:
+        app.mainloop()
+    except BaseException as exc:  # 让崩溃也留下证据，而不是静默退出
+        log_line(f"mainloop 异常退出：{exc!r}")
+        raise
+    finally:
+        log_shutdown("mainloop 正常返回")
 
 
 if __name__ == "__main__":

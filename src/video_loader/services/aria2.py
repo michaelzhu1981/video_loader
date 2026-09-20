@@ -108,9 +108,16 @@ def install_aria2c_to_venv(log_callback: LogCallback | None = None) -> str:
 class Aria2Session:
     """单个下载任务对应的临时 aria2c 进程 + JSON-RPC 客户端。"""
 
-    def __init__(self, directory: Path, log_callback: LogCallback | None = None) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        log_callback: LogCallback | None = None,
+        max_concurrent_downloads: int | None = None,
+    ) -> None:
         self.directory = directory
         self.log_callback = log_callback
+        # 多行磁力链接时，界面上的「并发数」转成 aria2 的同时下载任务数（不传则用 aria2 默认 5）。
+        self.max_concurrent_downloads = max_concurrent_downloads
         self.secret = secrets.token_hex(16)
         self.port = _free_port()
         self.url = f"http://127.0.0.1:{self.port}/jsonrpc"
@@ -125,19 +132,27 @@ class Aria2Session:
             )
         return aria2
 
-    def start(self) -> None:
-        path = self.aria2_path
+    def build_command(self) -> list[str]:
+        """aria2c 的启动参数（单独成方法，便于测试断言并发参数真的传下去了）。"""
         command = [
-            path,
+            self.aria2_path,
             "--enable-rpc",
             f"--rpc-secret={self.secret}",
             f"--rpc-listen-port={self.port}",
             f"--dir={self.directory}",
             "--seed-time=0",
+            # 断点续传：aria2 靠 .aria2 控制文件在同一个 --dir 里继续上次没下完的任务
+            "--continue=true",
             "--quiet",
         ]
+        if self.max_concurrent_downloads:
+            command.append(f"--max-concurrent-downloads={self.max_concurrent_downloads}")
         if sys.platform != "win32":
             command.append("--log=/dev/null")
+        return command
+
+    def start(self) -> None:
+        command = self.build_command()
         # stdout/stderr 用 DEVNULL：管道没人读取时写满缓冲区会让 aria2c 卡死
         self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _LIVE_SESSIONS.add(self)
