@@ -3,12 +3,19 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from threading import Event
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-import requests
-
-from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
+from video_loader.models import (
+    DownloadResult,
+    DownloadTask,
+    HttpSession,
+    LogCallback,
+    ProgressCallback,
+)
 from video_loader.utils import unique_path
+
+if TYPE_CHECKING:
+    import requests
 
 
 class Downloader(Protocol):
@@ -23,7 +30,7 @@ class Downloader(Protocol):
 
 
 def request_with_retries(
-    session: requests.Session,
+    session: HttpSession,
     method: str,
     url: str,
     task: DownloadTask,
@@ -55,7 +62,7 @@ def request_with_retries(
 
 
 def download_file(
-    session: requests.Session,
+    session: HttpSession,
     url: str,
     path: Path,
     task: DownloadTask,

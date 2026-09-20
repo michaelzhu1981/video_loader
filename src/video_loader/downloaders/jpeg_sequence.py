@@ -4,10 +4,9 @@ from pathlib import Path
 from threading import Event
 from urllib.parse import urlparse
 
-import requests
-
 from video_loader.downloaders.base import download_file, request_with_retries
 from video_loader.downloaders.hls import parse_m3u8_segments
+from video_loader.services.http_client import build_session
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
 from video_loader.services.ffmpeg import combine_with_concat_protocol
 from video_loader.utils import safe_filename, unique_path
@@ -23,7 +22,7 @@ class JpegSequenceDownloader:
     ) -> DownloadResult:
         try:
             task.output_dir.mkdir(parents=True, exist_ok=True)
-            with requests.Session() as session:
+            with build_session(task, log_callback) as session:
                 log_callback(f"正在获取 JPEG 播放列表：{task.url}")
                 response = request_with_retries(session, "GET", task.url, task, log_callback)
                 segments = parse_m3u8_segments(response.text, task.url, (".jpeg", ".jpg"))

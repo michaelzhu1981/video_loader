@@ -5,6 +5,7 @@ from .hls import HlsDownloader
 from .jpeg_sequence import JpegSequenceDownloader
 from .magnet import MagnetDownloader
 from .segment_list import SegmentListDownloader
+from .sniff import SniffDownloader
 
 __all__ = [
     "DirectDownloader",
@@ -12,4 +13,5 @@ __all__ = [
     "JpegSequenceDownloader",
     "MagnetDownloader",
     "SegmentListDownloader",
+    "SniffDownloader",
 ]

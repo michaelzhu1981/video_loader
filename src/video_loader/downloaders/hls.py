@@ -5,9 +5,8 @@ from pathlib import Path
 from threading import Event
 from urllib.parse import urljoin, urlparse
 
-import requests
-
 from video_loader.downloaders.base import download_file, request_with_retries
+from video_loader.services.http_client import build_session
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
 from video_loader.services.ffmpeg import combine_with_concat_demuxer
 from video_loader.utils import filename_from_url, safe_filename, unique_path
@@ -42,7 +41,7 @@ class HlsDownloader:
     ) -> DownloadResult:
         try:
             task.output_dir.mkdir(parents=True, exist_ok=True)
-            with requests.Session() as session:
+            with build_session(task, log_callback) as session:
                 log_callback(f"正在获取播放列表：{task.url}")
                 response = request_with_retries(session, "GET", task.url, task, log_callback)
                 segments = parse_m3u8_segments(response.text, task.url)
@@ -86,7 +85,7 @@ class HlsDownloader:
                 raise RuntimeError("下载已取消")
             suffix = Path(urlparse(url).path).suffix or ".bin"
             name = f"segment-{index:05d}{suffix}"
-            with requests.Session() as worker_session:
+            with build_session(task) as worker_session:
                 return index, download_file(worker_session, url, segment_dir / name, task, log_callback, cancel_event)
 
         workers = max(1, min(task.concurrency, 16))

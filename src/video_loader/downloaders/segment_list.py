@@ -4,10 +4,9 @@ from pathlib import Path
 from threading import Event
 from urllib.parse import urlparse
 
-import requests
-
 from video_loader.downloaders.base import download_file
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
+from video_loader.services.http_client import build_session
 from video_loader.services.ffmpeg import combine_with_concat_demuxer
 from video_loader.utils import safe_filename, unique_path
 
@@ -30,7 +29,7 @@ class SegmentListDownloader:
             segment_dir.mkdir(parents=True, exist_ok=True)
             files: list[Path] = []
 
-            with requests.Session() as session:
+            with build_session(task, log_callback) as session:
                 for index, url in enumerate(urls):
                     if cancel_event.is_set():
                         raise RuntimeError("下载已取消")
