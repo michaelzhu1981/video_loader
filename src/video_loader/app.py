@@ -66,6 +66,13 @@ SNIFF_PLACEHOLDER = "https://example.com/watch/123456"
 SNIFF_HINT = "网页嗅探：粘贴视频页面地址（不是 m3u8 链接），点「解析网页」列出清晰度后直接下载。"
 PARSE_BUTTON_TEXT = "解析网页"
 QUALITY_HINT = "清晰度：先点「解析网页」，再从解析结果里选择要下载的画质。"
+WINDOW_WIDTH = 1120
+WINDOW_MIN_WIDTH = 980
+WINDOW_MIN_HEIGHT = 720
+# 开局兜底高度：还没量出内容高度前先用它，免得先闪一个把底部按钮裁掉的矮窗口。
+WINDOW_HEIGHT_FALLBACK = 1160
+# 屏幕边距：窗口高度最多到「屏幕高度 - 这个值」，避免窗口比屏幕还高导致够不到按钮。
+SCREEN_EDGE_MARGIN = 80
 
 
 class VideoLoaderApp(ctk.CTk):
@@ -76,8 +83,8 @@ class VideoLoaderApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("视频下载器")
-        self.geometry("1120x980")
-        self.minsize(980, 720)
+        self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT_FALLBACK}")
+        self.minsize(WINDOW_MIN_WIDTH, WINDOW_HEIGHT_FALLBACK)
 
         self.manager = DownloadManager()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -110,7 +117,20 @@ class VideoLoaderApp(ctk.CTk):
         self._build_header()
         self._build_config_panel()
         self._build_log_panel()
+        self._fit_window_height()
         self.after(100, self._poll_events)
+
+    def _fit_window_height(self) -> None:
+        """按内容实际高度撑开窗口。
+
+        左侧配置面板每行都是固定高度，窗口比内容矮时底部「开始 / 取消」会被裁掉，
+        所以这里量一次内容高度再决定窗口高度（屏幕放不下时退让到屏幕可用高度）。
+        """
+        self.update_idletasks()
+        limit = max(self.winfo_screenheight() - SCREEN_EDGE_MARGIN, WINDOW_MIN_HEIGHT)
+        height = min(max(self.winfo_reqheight(), WINDOW_HEIGHT_FALLBACK), limit)
+        self.geometry(f"{WINDOW_WIDTH}x{height}")
+        self.minsize(WINDOW_MIN_WIDTH, height)
 
     def _configure_grid(self) -> None:
         self.grid_columnconfigure(0, weight=0)
