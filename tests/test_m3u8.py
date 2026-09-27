@@ -32,6 +32,21 @@ class M3U8ParserTests(unittest.TestCase):
     def test_empty_playlist(self) -> None:
         self.assertEqual(parse_m3u8_segments("#EXTM3U\n#EXT-X-ENDLIST", "https://example.com/video.m3u8"), [])
 
+    def test_unsupported_hls_tags_fail_before_downloading_segments(self) -> None:
+        for tag in (
+            '#EXT-X-MAP:URI="init.mp4"',
+            "#EXT-X-BYTERANGE:100@0",
+            '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+            "#EXT-X-DISCONTINUITY",
+            '#EXT-X-PART:DURATION=0.5,URI="part.ts"',
+        ):
+            with self.subTest(tag=tag), self.assertRaisesRegex(RuntimeError, "暂不支持"):
+                parse_m3u8_segments(f"#EXTM3U\n{tag}\nsegment.ts", "https://example.com/video.m3u8")
+
+    def test_explicitly_unencrypted_segments_still_parse(self) -> None:
+        text = "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\nsegment.ts"
+        self.assertEqual(parse_m3u8_segments(text, "https://example.com/video.m3u8"), ["https://example.com/segment.ts"])
+
     def test_playlist_url_detection(self) -> None:
         self.assertTrue(is_playlist_url("https://example.com/high/video.m3u8"))
         self.assertFalse(is_playlist_url("https://example.com/high/segment.ts"))

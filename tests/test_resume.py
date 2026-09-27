@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import http.server
+import hashlib
 import socketserver
 import sys
 import tempfile
@@ -23,7 +24,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from video_loader.downloaders.base import download_one, part_path  # noqa: E402
+from video_loader.downloaders.base import _read_metadata, _resource_identity, _write_metadata, download_one, part_path  # noqa: E402
 from video_loader.downloaders.hls import HlsDownloader  # noqa: E402
 from video_loader.downloaders.jpeg_sequence import JpegSequenceDownloader  # noqa: E402
 from video_loader.downloaders.segment_list import SegmentListDownloader  # noqa: E402
@@ -59,25 +60,30 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        etag = f'"{hashlib.sha256(body).hexdigest()}"'
+
         start = 0
         raw_range = headers.get("range", "")
-        if raw_range.startswith("bytes="):
+        if raw_range.startswith("bytes=") and headers.get("if-range", etag) == etag:
             head = raw_range[len("bytes=") :].split("-", 1)[0]
             start = int(head) if head.isdigit() else 0
 
         if start >= len(body):
             self.send_response(416)
             self.send_header("Content-Range", f"bytes */{len(body)}")
+            self.send_header("ETag", etag)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
         if start:
             self.send_response(206)
-            self.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
+            reported_start = 0 if server.wrong_range_start else start
+            self.send_header("Content-Range", f"bytes {reported_start}-{len(body) - 1}/{len(body)}")
         else:
             self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("ETag", etag)
         self.send_header("Content-Length", str(len(body) - start))
         self.end_headers()
 
@@ -117,6 +123,7 @@ class _RangeServer(socketserver.ThreadingTCPServer):
         self.lock = threading.Lock()
         self.request_log: list[tuple[str, dict[str, str]]] = []
         self.sent_bytes: dict[str, int] = defaultdict(int)
+        self.wrong_range_start = False
         self._thread = threading.Thread(target=self.serve_forever, daemon=True)
 
     def __enter__(self) -> "_RangeServer":
@@ -147,6 +154,11 @@ def fake_combine(files: list[Path], output_path: Path, _log: object = None) -> P
     return output_path
 
 
+def seed_cache(path: Path, url: str, task: DownloadTask, body: bytes) -> None:
+    """模拟前一次下载留下的文件和对应的服务端校验值。"""
+    _write_metadata(path, _resource_identity(url, task), {"ETag": f'"{hashlib.sha256(body).hexdigest()}"'})
+
+
 class ResumeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -167,6 +179,7 @@ class ResumeTests(unittest.TestCase):
         target.write_bytes(self.payload)
         with _RangeServer({"seg.ts": self.payload}) as server:
             task = self._task(server.url("seg.ts"))
+            seed_cache(target, task.url, task, self.payload)
             with self._session(task) as session:
                 path, written = download_one(session, task.url, target, task, lambda _m: None, Event())
 
@@ -182,6 +195,7 @@ class ResumeTests(unittest.TestCase):
         target.write_bytes(self.half)
         with _RangeServer({"seg.ts": self.payload}) as server:
             task = self._task(server.url("seg.ts"))
+            seed_cache(target, task.url, task, self.payload)
             with self._session(task) as session:
                 path, written = download_one(session, task.url, target, task, lambda _m: None, Event())
 
@@ -197,6 +211,7 @@ class ResumeTests(unittest.TestCase):
         part.write_bytes(self.half)
         with _RangeServer({"seg.ts": self.payload}) as server:
             task = self._task(server.url("seg.ts"))
+            seed_cache(part, task.url, task, self.payload)
             with self._session(task) as session:
                 path, _written = download_one(session, task.url, target, task, lambda _m: None, Event())
 
@@ -211,10 +226,64 @@ class ResumeTests(unittest.TestCase):
         target.write_bytes(self.payload + b"garbage")
         with _RangeServer({"seg.ts": self.payload}) as server:
             task = self._task(server.url("seg.ts"))
+            seed_cache(target, task.url, task, self.payload)
             with self._session(task) as session:
                 path, _written = download_one(session, task.url, target, task, lambda _m: None, Event())
 
         self.assertEqual(path.read_bytes(), self.payload)
+
+    def test_same_length_changed_resource_is_redownloaded(self) -> None:
+        target = self.root / "out" / "segment.ts"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.payload)
+        changed = payload(2, len(self.payload))
+        with _RangeServer({"seg.ts": changed}) as server:
+            task = self._task(server.url("seg.ts"))
+            seed_cache(target, task.url, task, self.payload)
+            with self._session(task) as session:
+                path, written = download_one(session, task.url, target, task, lambda _m: None, Event())
+        self.assertEqual(path.read_bytes(), changed)
+        self.assertEqual(written, len(changed))
+        self.assertEqual(count_requests(server, "seg.ts"), 1, "完整响应应直接用于重下，不再发第二次请求")
+
+    def test_different_url_does_not_reuse_same_named_segment(self) -> None:
+        target = self.root / "out" / "segment.ts"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.payload)
+        changed = payload(2, len(self.payload))
+        with _RangeServer({"old.ts": self.payload, "new.ts": changed}) as server:
+            task = self._task(server.url("new.ts"))
+            seed_cache(target, server.url("old.ts"), task, self.payload)
+            with self._session(task) as session:
+                path, written = download_one(session, task.url, target, task, lambda _m: None, Event())
+        self.assertEqual(path.read_bytes(), changed)
+        self.assertEqual(written, len(changed))
+
+    def test_incorrect_content_range_start_forces_fresh_download(self) -> None:
+        target = self.root / "out" / "segment.ts"
+        part = part_path(target)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(self.half)
+        with _RangeServer({"seg.ts": self.payload}) as server:
+            server.wrong_range_start = True
+            task = self._task(server.url("seg.ts"))
+            seed_cache(part, task.url, task, self.payload)
+            with self._session(task) as session:
+                path, _written = download_one(session, task.url, target, task, lambda _m: None, Event())
+        self.assertEqual(path.read_bytes(), self.payload)
+        self.assertEqual(count_requests(server, "seg.ts"), 2)
+
+    def test_cache_without_metadata_is_redownloaded(self) -> None:
+        target = self.root / "out" / "segment.ts"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.payload)
+        with _RangeServer({"seg.ts": self.payload}) as server:
+            task = self._task(server.url("seg.ts"))
+            with self._session(task) as session:
+                path, written = download_one(session, task.url, target, task, lambda _m: None, Event())
+        self.assertEqual(path.read_bytes(), self.payload)
+        self.assertEqual(written, len(self.payload))
+        self.assertEqual(server.ranges("seg.ts"), [])
 
     def test_cancel_keeps_part_file_and_next_run_finishes_it(self) -> None:
         target = self.root / "out" / "big.bin"
@@ -252,6 +321,30 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), self.payload)
         # 服务端计数会把"写进 socket 但客户端已不再读"的部分也算上，所以只断言"至少把整份都发过"
         self.assertGreaterEqual(server.sent_bytes["big.bin"], len(self.payload))
+
+    @unittest.skipUnless(http_client.curl_cffi_available(), "需要 curl_cffi 快速落盘路径")
+    def test_curl_callback_cancel_without_validator_restarts_safely(self) -> None:
+        class CancelAfterFirstChunk(Event):
+            def __init__(self) -> None:
+                super().__init__()
+                self.checks = 0
+
+            def is_set(self) -> bool:
+                self.checks += 1
+                return self.checks > 1
+
+        target = self.root / "out" / "callback.bin"
+        with _RangeServer({"callback.bin": self.payload}, chunk_delay=0.01) as server:
+            task = self._task(server.url("callback.bin"))
+            with self._session(task) as session, self.assertRaises(RuntimeError):
+                download_one(session, task.url, target, task, lambda _m: None, CancelAfterFirstChunk())
+            partial = part_path(target)
+            self.assertGreater(partial.stat().st_size, 0)
+            self.assertEqual(_read_metadata(partial), {})
+            with self._session(task) as session:
+                path, _written = download_one(session, task.url, target, task, lambda _m: None, Event())
+        self.assertEqual(path.read_bytes(), self.payload)
+        self.assertEqual(server.ranges("callback.bin"), [])
 
     def test_failed_download_leaves_no_empty_part(self) -> None:
         target = self.root / "out" / "missing.bin"
@@ -301,6 +394,13 @@ class SegmentReuseTests(unittest.TestCase):
             else:
                 (segment_dir / f"segment-{index:05d}.ts").write_bytes(data)
 
+    def _seed_existing(self, out: Path, server: _RangeServer, task: DownloadTask) -> None:
+        for index in range(self.count):
+            target = out / "_segments" / f"segment-{index:05d}.ts"
+            source = part_path(target) if part_path(target).exists() else target
+            if source.exists():
+                seed_cache(source, server.url(f"seg{index}.ts"), task, self.body[f"seg{index}.ts"])
+
     def test_segment_list_reuses_finished_segments_and_resumes_partials(self) -> None:
         out = self.root / "out"
         self._prune(out, missing={4}, truncated={2})
@@ -314,6 +414,7 @@ class SegmentReuseTests(unittest.TestCase):
                 combine_segments=False,
                 retries=0,
             )
+            self._seed_existing(out, server, task)
             logs: list[str] = []
             result = SegmentListDownloader().download(task, lambda *_a: None, logs.append, Event())
 
@@ -338,6 +439,7 @@ class SegmentReuseTests(unittest.TestCase):
         self._prune(out, missing={5})
         with _RangeServer(self.payloads) as server:
             task = DownloadTask(url=server.url("list.m3u8"), mode="hls", output_dir=out, concurrency=2, retries=0)
+            self._seed_existing(out, server, task)
             with mock.patch("video_loader.downloaders.hls.combine_with_concat_demuxer", fake_combine):
                 result = HlsDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
 
@@ -364,7 +466,7 @@ class SegmentCleanupTests(unittest.TestCase):
         self.payloads["list.m3u8"] = m3u8([f"seg{i}.ts" for i in range(self.count)])
 
     def _segments(self, out: Path) -> list[Path]:
-        return sorted((out / "_segments").glob("segment-*"))
+        return sorted((out / "_segments").glob("segment-*.ts"))
 
     def _hls_task(self, server: _RangeServer, out: Path) -> DownloadTask:
         return DownloadTask(url=server.url("list.m3u8"), mode="hls", output_dir=out, concurrency=2, retries=0)
@@ -394,17 +496,18 @@ class SegmentCleanupTests(unittest.TestCase):
         def failing_combine(_files: list[Path], _output: Path, _log: object = None) -> Path:
             raise RuntimeError("ffmpeg 执行失败，退出码：1")
 
-        result = self._run_hls(out, combine=failing_combine)
-        self.assertFalse(result.success, "合并失败就不该报成功")
-        self.assertEqual(len(self._segments(out)), self.count, "合并没成功，片段必须留着")
-
         with _RangeServer(self.payloads) as server:
             task = self._hls_task(server, out)
+            with mock.patch("video_loader.downloaders.hls.combine_with_concat_demuxer", failing_combine):
+                result = HlsDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
+            self.assertFalse(result.success, "合并失败就不该报成功")
+            self.assertEqual(len(self._segments(out)), self.count, "合并没成功，片段必须留着")
+            sent_before_retry = dict(server.sent_bytes)
             with mock.patch("video_loader.downloaders.hls.combine_with_concat_demuxer", fake_combine):
                 retried = HlsDownloader().download(task, lambda *_a: None, lambda _m: None, Event())
             self.assertTrue(retried.success, retried.errors)
             for index in range(self.count):
-                self.assertEqual(server.sent_bytes[f"seg{index}.ts"], 0, f"seg{index} 应该被复用而不是重下")
+                self.assertEqual(server.sent_bytes[f"seg{index}.ts"], sent_before_retry[f"seg{index}.ts"], f"seg{index} 应该被复用而不是重下")
 
     def test_segments_survive_empty_merge_output(self) -> None:
         out = self.root / "empty"
@@ -415,7 +518,9 @@ class SegmentCleanupTests(unittest.TestCase):
             return output_path
 
         result = self._run_hls(out, combine=empty_combine)
-        self.assertTrue(result.success, result.errors)
+        self.assertFalse(result.success, "空合并产物不能报告成功")
+        self.assertTrue(any("合并产物为空" in error for error in result.errors), result.errors)
+        self.assertFalse((out / "video.mp4").exists(), "空产物不应留在输出目录")
         self.assertEqual(len(self._segments(out)), self.count, "合并产物是空的：片段是仅存的数据，不能删")
 
     def test_segment_list_keeps_segments_when_combine_is_off(self) -> None:

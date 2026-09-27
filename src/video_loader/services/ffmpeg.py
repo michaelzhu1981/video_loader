@@ -133,12 +133,25 @@ def combine_with_concat_protocol(files: list[Path], output_path: Path, log_callb
     return _run_ffmpeg(command, output_path, log_callback)
 
 
+def validate_merged_output(output_path: Path) -> None:
+    """ffmpeg 有时退出码为 0 却没有写出有效文件，此时不能清理原片段。"""
+    try:
+        with output_path.open("rb") as handle:
+            has_content = bool(handle.read(1))
+    except OSError as exc:
+        raise RuntimeError(f"无法读取合并产物，已保留下载好的片段：{exc}") from exc
+    if not has_content:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("合并产物为空，已保留下载好的片段。")
+
+
 def _run_ffmpeg(command: list[str], output_path: Path, log_callback) -> Path:
     log_callback("正在运行 ffmpeg...")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     assert process.stdout is not None
-    for line in process.stdout:
-        log_callback(line.rstrip())
+    with process.stdout:
+        for line in process.stdout:
+            log_callback(line.rstrip())
     code = process.wait()
     if code != 0:
         raise RuntimeError(f"ffmpeg 执行失败，退出码：{code}")

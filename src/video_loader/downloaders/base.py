@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -22,8 +25,9 @@ if TYPE_CHECKING:
 
 
 # 下载中的内容写在 <正式名字>.part，只有完整下完才原子改名成正式名字。
-# 于是"正式名字存在"就等价于"这个文件是完整的"，重跑时可以放心复用。
+# 正式名字表示本次写入已结束；跨任务复用还必须核对旁边的资源身份和服务端校验值。
 PART_SUFFIX = ".part"
+META_SUFFIX = ".meta.json"
 CHUNK_SIZE = 1024 * 256
 
 
@@ -41,6 +45,51 @@ class Downloader(Protocol):
 def part_path(target: Path) -> Path:
     """文件下载中的临时名字（`.part` 结尾，不会被 ffmpeg 合并进去）。"""
     return target.with_name(target.name + PART_SUFFIX)
+
+
+def metadata_path(path: Path) -> Path:
+    return path.with_name(path.name + META_SUFFIX)
+
+
+def _resource_identity(url: str, task: DownloadTask) -> str:
+    # 只保存摘要，避免把带令牌的 URL、Cookie 或请求头写进磁盘元数据。
+    details = [url, sorted(task.headers.items()), sorted(task.cookies.items()), task.referer]
+    return hashlib.sha256(json.dumps(details, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _read_metadata(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(metadata_path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        return {key: value for key, value in data.items() if isinstance(key, str) and isinstance(value, str)}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_metadata(path: Path, identity: str, headers: Mapping[str, str]) -> None:
+    destination = metadata_path(path)
+    temporary = destination.with_name(destination.name + ".tmp")
+    data = {
+        "identity": identity,
+        "etag": headers.get("ETag", ""),
+        "last_modified": headers.get("Last-Modified", ""),
+    }
+    temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(destination)
+
+
+def _resume_validator(metadata: Mapping[str, str]) -> tuple[str, str] | None:
+    etag = metadata.get("etag", "")
+    if etag and not etag.startswith("W/"):
+        return "ETag", etag
+    modified = metadata.get("last_modified", "")
+    return ("Last-Modified", modified) if modified else None
+
+
+def _range_start(value: str | None) -> int | None:
+    match = re.fullmatch(r"bytes\s+(\d+)-\d+/(?:\d+|\*)", value or "", re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 def file_size(path: Path) -> int:
@@ -83,6 +132,7 @@ def request_with_retries(
     for attempt in range(1, attempts + 1):
         if before_attempt is not None:
             before_attempt()  # type: ignore[operator]
+        response = None
         try:
             response = session.request(
                 method,
@@ -99,11 +149,13 @@ def request_with_retries(
             response.raise_for_status()
             return response
         except Exception as exc:  # requests raises several concrete exception types.
+            if response is not None:
+                response.close()
             last_error = exc
             if attempt < attempts:
                 log_callback(f"重试 {attempt}/{task.retries}：{url}")
                 time.sleep(min(2 * attempt, 5))
-    raise RuntimeError(f"请求失败：{url}（{last_error}）")
+    raise RuntimeError(f"请求失败：{url}（{last_error}）") from last_error
 
 
 class _FileSink:
@@ -166,15 +218,26 @@ def _plan_resume(
     """开工前和磁盘、服务端对一次账，决定这次从哪继续。
 
     返回 ``(offset, response)``：offset 为 -1 表示"服务端确认已经下满，直接复用"；
-    response 非空表示已经拿到一个 206 续传响应，调用方接着往后面追加即可。
+    response 非空表示已拿到 206 续传响应或 200 完整响应，调用方直接消费它。
     """
     if part.exists():
+        source = part
         offset = file_size(part)
     elif target.exists():
+        source = target
         # 可能是本程序上一次留下的完整文件，也可能是别处/旧版本写了一半的文件，
         # 所以不靠猜：用 Range 问服务端"从我这份的大小往后还有没有内容"。
         offset = file_size(target)
     else:
+        return 0, None
+
+    metadata = _read_metadata(source)
+    validator = _resume_validator(metadata)
+    if metadata.get("identity") != _resource_identity(url, task) or validator is None or offset == 0:
+        log_callback("本地缓存缺少匹配的资源身份或服务端校验值，重新下载。")
+        if source == part:
+            _discard(part)
+            _discard(metadata_path(part))
         return 0, None
 
     response = request_with_retries(
@@ -184,29 +247,42 @@ def _plan_resume(
         task,
         log_callback,
         stream=True,
-        extra_headers={"Range": f"bytes={offset}-"},
+        extra_headers={"Range": f"bytes={offset}-", "If-Range": validator[1]},
         accept_status=(416,),
     )
     status = int(response.status_code)
 
+    validator_matches = response.headers.get(validator[0], "") == validator[1]
     if status == 416:  # 本地这份不比服务端少
         response.close()
         total = _total_from_content_range(response.headers.get("content-range"))
-        if total is not None and offset == total:
+        if validator_matches and total is not None and offset == total:
             if part.exists():
                 part.replace(target)
+                metadata_path(part).replace(metadata_path(target))
             return -1, None
         log_callback(
-            f"本地缓存的片段大小对不上（本地 {offset} 字节 / 服务端 {total if total is not None else '未知'} 字节），重新下载。"
+            "本地缓存的大小或服务端校验值已变化，重新下载。"
         )
     elif status == 206:
-        if not part.exists() and target.exists():
-            target.replace(part)  # 半截文件挪到 .part，维持"正式名字 = 完整"的约定
-        return offset, response
-    else:  # 200：对端忽略了 Range，返回的是整份内容
-        log_callback("对端不支持 Range 续传，改为从头下载。")
+        if validator_matches and _range_start(response.headers.get("Content-Range")) == offset:
+            if not part.exists() and target.exists():
+                target.replace(part)  # 半截文件挪到 .part，维持"正式名字 = 完整"的约定
+                metadata_path(target).replace(metadata_path(part))
+            return offset, response
+        response.close()
+        log_callback("服务端返回的续传范围或校验值不匹配，重新下载。")
+    elif status == 200:  # 对端忽略 Range 或资源已变化；直接消费这份完整响应
+        log_callback("服务端返回完整文件，改为从头下载。")
+        _discard(part)
+        _discard(metadata_path(part))
+        return 0, response
+    else:
+        response.close()
+        raise RuntimeError(f"无法处理续传响应：HTTP {status}")
 
     _discard(part)
+    _discard(metadata_path(part))
     return 0, None
 
 
@@ -225,7 +301,9 @@ def _write_stream(
     written = offset
     try:
         with part.open("ab" if offset else "wb") as file:
-            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+            # curl_cffi 不接受 chunk_size 参数，传入只会发出告警且不改变分块大小。
+            chunks = response.iter_content() if type(response).__module__.startswith("curl_cffi.") else response.iter_content(chunk_size=CHUNK_SIZE)
+            for chunk in chunks:
                 if cancel_event.is_set():
                     raise RuntimeError("下载已取消")
                 if not chunk:
@@ -248,11 +326,11 @@ def _write_with_content_callback(
     task: DownloadTask,
     log_callback: LogCallback,
     cancel_event: Event,
-) -> int:
+) -> requests.Response:
     """全新下载的快路径：走会话自己的 curl 句柄，连接可以复用（见 download_one）。"""
     with part.open("wb") as file:
         sink = _FileSink(file, cancel_event)
-        request_with_retries(
+        return request_with_retries(
             session,
             "GET",
             url,
@@ -261,7 +339,6 @@ def _write_with_content_callback(
             content_callback=sink,
             before_attempt=sink.reset,
         )
-        return sink.written
 
 
 def download_one(
@@ -281,12 +358,10 @@ def download_one(
 
     断点续传的三条约定：
 
-    1. 进行中的内容写 ``target.part``，完整下完才原子改名成 ``target``——所以正式名字
-       存在就等于文件完整，重跑时可以直接复用；
-    2. ``target``（或 ``.part``）已存在时先用 ``Range: bytes=<已有长度>-`` 问服务端：
-       416 = 已经下满（复用）／206 = 本地那份其实是半截（挪成 .part 继续追加）／
-       200 = 对端不支持 Range（丢掉本地那份从头下）；
-    3. 中途失败或取消时保留 ``.part``，下次接着下；空文件不留。
+    1. 进行中的内容写 ``target.part``，完整下完才原子改名成 ``target``；
+    2. 本地身份和服务端校验值都匹配时才用 Range / If-Range 复用或续下；
+       200 完整响应直接用于重下，不重复请求；
+    3. 中途失败或取消时保留 ``.part``；如果拿不到校验值，下次安全地从头下载。
 
     curl_cffi 的流式读取（stream=True）每次请求都会复制一份 curl 句柄，而复制品不继承连接
     缓存：实测 3 次请求 = 3 条 TCP 连接，也就是每个分片都要重做一次 TCP + TLS 握手。所以
@@ -297,6 +372,7 @@ def download_one(
     target.parent.mkdir(parents=True, exist_ok=True)
     part = part_path(target)
     use_resume = task.resume if resume is None else resume
+    identity = _resource_identity(url, task)
 
     if use_resume:
         offset, response = _plan_resume(session, url, target, part, task, log_callback)
@@ -308,10 +384,16 @@ def download_one(
 
     try:
         if response is None and offset == 0 and progress_callback is None and uses_curl_cffi(session):
-            _write_with_content_callback(session, url, part, task, log_callback, cancel_event)
+            completed_response = _write_with_content_callback(session, url, part, task, log_callback, cancel_event)
+            _write_metadata(part, identity, completed_response.headers)
         else:
             if response is None:
                 response = request_with_retries(session, "GET", url, task, log_callback, stream=True)
+            try:
+                _write_metadata(part, identity, response.headers)
+            except Exception:
+                response.close()
+                raise
             _write_stream(
                 response,
                 part,
@@ -326,10 +408,12 @@ def download_one(
     except Exception:
         if file_size(part) == 0:
             _discard(part)  # 什么都没下到，别留个空壳让下次多问一次 416
+            _discard(metadata_path(part))
         raise
 
     written = file_size(part) - offset
     part.replace(target)
+    metadata_path(part).replace(metadata_path(target))
     return target, written
 
 
@@ -439,7 +523,11 @@ def cleanup_segments(files: Sequence[Path], merged: Path, log_callback: LogCallb
         log_callback("合并产物为空，已保留下载好的片段。")
         return
 
-    removed = sum(1 for path in files if _discard(path))
+    removed = 0
+    for path in files:
+        if _discard(path):
+            removed += 1
+        _discard(metadata_path(path))
     if not removed:
         return
     for directory in {path.parent for path in files}:

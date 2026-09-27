@@ -109,6 +109,7 @@ class VideoLoaderApp(ctk.CTk):
         self.header_preset_var = ctk.StringVar(value="默认浏览器")
         self.quality_var = ctk.StringVar(value=AUTO_QUALITY_LABEL)
         self.quality_choices: list[tuple[str, StreamVariant]] = []
+        self.parsed_page_url = ""
         self.parsing = False
 
         install_exception_logging(self, self._log)
@@ -336,6 +337,10 @@ class VideoLoaderApp(ctk.CTk):
             return
 
         self.parsing = True
+        self.quality_choices = []
+        self.parsed_page_url = ""
+        self.quality_menu.configure(values=[AUTO_QUALITY_LABEL])
+        self.quality_var.set(AUTO_QUALITY_LABEL)
         self.parse_button.configure(state="disabled", text="解析中...")
         self._log(f"正在解析：{task.url}")
         threading.Thread(target=self._run_sniff, args=(task,), daemon=True).start()
@@ -349,6 +354,11 @@ class VideoLoaderApp(ctk.CTk):
         self.events.put(("sniff_ok", result))
 
     def _apply_sniff_result(self, result: SniffResult) -> None:
+        current = [line.strip() for line in self.url_box.get("1.0", "end").splitlines() if line.strip() and not line.strip().startswith("#")]
+        if not current or current[0] != result.page_url:
+            self._log("页面地址已变化，已忽略旧页面的解析结果；请重新解析。")
+            return
+        self.parsed_page_url = result.page_url
         self.quality_choices = describe_variants(result.variants)
         labels = [label for label, _variant in self.quality_choices]
         self.quality_menu.configure(values=labels or [AUTO_QUALITY_LABEL])
@@ -532,13 +542,15 @@ class VideoLoaderApp(ctk.CTk):
 
         preferred_quality = ""
         selected_stream_url = ""
-        if mode == "sniff":
+        if mode == "sniff" and url == self.parsed_page_url:
             chosen = self.quality_var.get()
             for label, variant in self.quality_choices:
                 if label == chosen:
                     preferred_quality = variant.quality_key or variant.label
                     selected_stream_url = variant.url
                     break
+        elif mode == "sniff" and self.quality_choices:
+            self._log("页面地址已变化，本次将重新识别视频流。")
 
         headers, notices = sanitize_headers(
             parse_headers(self.headers_box.get("1.0", "end").strip()),

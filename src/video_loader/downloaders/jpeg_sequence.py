@@ -8,7 +8,7 @@ from video_loader.downloaders.base import cleanup_segments, download_many, reque
 from video_loader.downloaders.hls import parse_m3u8_segments
 from video_loader.services.http_client import build_session
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
-from video_loader.services.ffmpeg import combine_with_concat_protocol
+from video_loader.services.ffmpeg import combine_with_concat_protocol, validate_merged_output
 from video_loader.utils import safe_filename, unique_path
 
 
@@ -48,6 +48,7 @@ class JpegSequenceDownloader:
                 output_name = f"{output_name}.mp4"
             output_path = unique_path(task.output_dir / output_name)
             combine_with_concat_protocol(files, output_path, log_callback)
+            validate_merged_output(output_path)
             cleanup_segments(files, output_path, log_callback)
             progress_callback(1.0, "JPEG 图片序列下载完成")
             return DownloadResult(True, output_path, f"已保存到 {output_path}")

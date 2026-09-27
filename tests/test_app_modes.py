@@ -131,6 +131,7 @@ class _StubTaskApp:
         self.browser_var = _StubVar(False)
         self.quality_var = _StubVar(quality)
         self.quality_choices = choices or []
+        self.parsed_page_url = url if choices else ""
         self.headers_box = _StubBox("User-Agent: Test")
         self.cookies_box = _StubBox("")
         self.logs: list[str] = []
@@ -162,6 +163,16 @@ class BuildTaskTests(unittest.TestCase):
         task = _build_task(app)
         self.assertEqual(task.preferred_quality, "")
         self.assertEqual(task.selected_stream_url, "")
+
+    def test_changed_page_does_not_use_previous_stream(self) -> None:
+        from video_loader.models import StreamVariant
+
+        variant = StreamVariant(url="https://cdn.example.com/page-a.m3u8", label="480p")
+        app = _StubTaskApp(app_module.SNIFF_LABEL, "https://site.example/watch/b", quality="480p", choices=[("480p", variant)])
+        app.parsed_page_url = "https://site.example/watch/a"
+        task = _build_task(app)
+        self.assertEqual(task.selected_stream_url, "")
+        self.assertEqual(task.url, "https://site.example/watch/b")
 
     def test_sniff_rejects_m3u8_link(self) -> None:
         app = _StubTaskApp(app_module.SNIFF_LABEL, "https://cdn.example.com/hls/video.m3u8")

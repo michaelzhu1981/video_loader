@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlparse
 from video_loader.downloaders.base import cleanup_segments, download_many, request_with_retries
 from video_loader.services.http_client import build_session
 from video_loader.models import DownloadResult, DownloadTask, LogCallback, ProgressCallback
-from video_loader.services.ffmpeg import combine_with_concat_demuxer
+from video_loader.services.ffmpeg import combine_with_concat_demuxer, validate_merged_output
 from video_loader.utils import filename_from_url, safe_filename, unique_path
 
 
@@ -15,6 +15,11 @@ def parse_m3u8_segments(text: str, base_url: str, suffixes: tuple[str, ...] | No
     segments: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
+        upper = line.upper()
+        if upper.startswith(("#EXT-X-MAP:", "#EXT-X-BYTERANGE:", "#EXT-X-DISCONTINUITY", "#EXT-X-PART:")):
+            raise RuntimeError(f"暂不支持此 HLS 播放列表标签：{line.split(':', 1)[0]}")
+        if upper.startswith("#EXT-X-KEY:") and "METHOD=NONE" not in upper:
+            raise RuntimeError("暂不支持加密 HLS 播放列表（EXT-X-KEY）。")
         if not line or line.startswith("#"):
             continue
         url = urljoin(base_url, line)
@@ -73,6 +78,7 @@ class HlsDownloader:
                 output_name = f"{output_name}.mp4"
             output_path = unique_path(task.output_dir / output_name)
             combine_with_concat_demuxer(files, output_path, log_callback)
+            validate_merged_output(output_path)
             cleanup_segments(files, output_path, log_callback)
             progress_callback(1.0, "HLS 下载完成")
             return DownloadResult(True, output_path, f"已保存到 {output_path}")
