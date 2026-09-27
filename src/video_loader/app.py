@@ -55,24 +55,24 @@ HEADER_PRESETS = {
 }
 # 心跳：日志里长时间没有心跳又没有"退出"行，就说明进程是被信号杀掉的（不是自己退出）。
 HEARTBEAT_SECONDS = 60
-HEADER_HINT = (
-    "请求头格式：每行一个。留空 User-Agent 时会用指纹伪装的 Chrome UA（推荐）；"
-    "写 Mozilla/5.0 这类占位 UA 会被 Cloudflare 直接 403。\n"
-    "Cloudflare 站点通常还需要 Referer；网页嗅探模式会自动用页面地址补上。"
-)
-COOKIE_HINT = "Cookie 格式：key=value; key2=value2，可直接粘贴浏览器 Network 面板里的 Cookie 值。"
 AUTO_QUALITY_LABEL = "自动（最高清晰度）"
 SNIFF_PLACEHOLDER = "https://example.com/watch/123456"
 SNIFF_HINT = "网页嗅探：粘贴视频页面地址（不是 m3u8 链接），点「解析网页」列出清晰度后直接下载。"
 PARSE_BUTTON_TEXT = "解析网页"
-QUALITY_HINT = "清晰度：先点「解析网页」，再从解析结果里选择要下载的画质。"
-WINDOW_WIDTH = 1120
-WINDOW_MIN_WIDTH = 980
-WINDOW_MIN_HEIGHT = 720
-# 开局兜底高度：还没量出内容高度前先用它，免得先闪一个把底部按钮裁掉的矮窗口。
-WINDOW_HEIGHT_FALLBACK = 1160
-# 屏幕边距：窗口高度最多到「屏幕高度 - 这个值」，避免窗口比屏幕还高导致够不到按钮。
+WINDOW_WIDTH = 1100
+WINDOW_HEIGHT = 760
+WINDOW_MIN_WIDTH = 900
+WINDOW_MIN_HEIGHT = 600
 SCREEN_EDGE_MARGIN = 80
+
+BG = "#0b111b"
+PANEL = "#151e2b"
+SURFACE = "#101824"
+FIELD = "#0d1520"
+BORDER = "#2b3748"
+TEXT = "#e9f0f8"
+MUTED = "#91a2b8"
+ACCENT = "#4f8cff"
 
 
 class VideoLoaderApp(ctk.CTk):
@@ -83,8 +83,9 @@ class VideoLoaderApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("视频下载器")
-        self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT_FALLBACK}")
-        self.minsize(WINDOW_MIN_WIDTH, WINDOW_HEIGHT_FALLBACK)
+        self.configure(fg_color=BG)
+        self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+        self.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
 
         self.manager = DownloadManager()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -106,6 +107,7 @@ class VideoLoaderApp(ctk.CTk):
         self.impersonate_var = ctk.BooleanVar(value=True)
         self.browser_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value=self._ffmpeg_status())
+        self.activity_var = ctk.StringVar(value="等待任务")
         self.header_preset_var = ctk.StringVar(value="默认浏览器")
         self.quality_var = ctk.StringVar(value=AUTO_QUALITY_LABEL)
         self.quality_choices: list[tuple[str, StreamVariant]] = []
@@ -122,177 +124,208 @@ class VideoLoaderApp(ctk.CTk):
         self.after(100, self._poll_events)
 
     def _fit_window_height(self) -> None:
-        """按内容实际高度撑开窗口。
-
-        左侧配置面板每行都是固定高度，窗口比内容矮时底部「开始 / 取消」会被裁掉，
-        所以这里量一次内容高度再决定窗口高度（屏幕放不下时退让到屏幕可用高度）。
-        """
+        """限制窗口高度；表单内容在左侧滚动，操作按钮始终可见。"""
         self.update_idletasks()
         limit = max(self.winfo_screenheight() - SCREEN_EDGE_MARGIN, WINDOW_MIN_HEIGHT)
-        height = min(max(self.winfo_reqheight(), WINDOW_HEIGHT_FALLBACK), limit)
+        height = min(WINDOW_HEIGHT, limit)
         self.geometry(f"{WINDOW_WIDTH}x{height}")
-        self.minsize(WINDOW_MIN_WIDTH, height)
+        self.minsize(WINDOW_MIN_WIDTH, min(WINDOW_MIN_HEIGHT, height))
 
     def _configure_grid(self) -> None:
-        self.grid_columnconfigure(0, weight=0)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=5)
+        self.grid_columnconfigure(1, weight=6)
         self.grid_rowconfigure(1, weight=1)
 
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, fg_color="#0b0f14", corner_radius=0)
+        header = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
 
-        title = ctk.CTkLabel(header, text="视频下载器", font=ctk.CTkFont(size=22, weight="bold"))
-        title.grid(row=0, column=0, sticky="w", padx=22, pady=(16, 2))
+        title = ctk.CTkLabel(header, text="视频下载器", text_color=TEXT, font=ctk.CTkFont(size=21, weight="bold"))
+        title.grid(row=0, column=0, sticky="w", padx=20, pady=(14, 0))
 
         subtitle = ctk.CTkLabel(
             header,
             textvariable=self.status_var,
-            text_color="#8b949e",
-            font=ctk.CTkFont(size=13),
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
         )
-        subtitle.grid(row=1, column=0, sticky="w", padx=22, pady=(0, 16))
+        subtitle.grid(row=1, column=0, sticky="w", padx=20, pady=(0, 12))
 
     def _build_config_panel(self) -> None:
-        panel = ctk.CTkFrame(self, fg_color="#111820", corner_radius=10)
-        panel.grid(row=1, column=0, sticky="nsew", padx=(18, 10), pady=18)
+        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=14, border_width=1, border_color=BORDER)
+        panel.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=(0, 16))
         panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(0, weight=1)
 
-        section_row = ctk.CTkFrame(panel, fg_color="transparent")
-        section_row.grid(row=0, column=0, sticky="w", padx=18, pady=(18, 8))
-        section = ctk.CTkLabel(section_row, text="下载任务", font=ctk.CTkFont(size=16, weight="bold"))
-        section.grid(row=0, column=0, sticky="w")
-        help_icon = ctk.CTkLabel(
-            section_row,
-            text="?",
-            width=22,
-            height=22,
-            corner_radius=11,
-            fg_color="#30363d",
-            text_color="#c9d1d9",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        )
-        help_icon.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        form = ctk.CTkScrollableFrame(panel, fg_color="transparent", scrollbar_button_color=BORDER)
+        form.grid(row=0, column=0, sticky="nsew", padx=4, pady=(10, 0))
+        form.grid_columnconfigure(0, weight=1)
+
+        task = ctk.CTkFrame(form, fg_color="transparent")
+        task.grid(row=0, column=0, sticky="ew", padx=14)
+        task.grid_columnconfigure(0, weight=1)
+        heading = ctk.CTkFrame(task, fg_color="transparent")
+        heading.grid(row=0, column=0, sticky="ew", pady=(2, 10))
+        ctk.CTkLabel(heading, text="下载任务", text_color=TEXT, font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
+        help_icon = ctk.CTkLabel(heading, text="?", width=20, height=20, corner_radius=10,
+                                  fg_color=BORDER, text_color=MUTED, font=ctk.CTkFont(size=12, weight="bold"))
+        help_icon.pack(side="left", padx=8)
         help_icon.bind("<Enter>", lambda _event: self._show_task_tooltip(help_icon))
         help_icon.bind("<Leave>", lambda _event: self._hide_task_tooltip())
 
-        self.mode_menu = ctk.CTkOptionMenu(
-            panel,
-            values=list(LABEL_TO_MODE.keys()),
-            variable=self.mode_var,
-            command=self._on_mode_change,
-        )
-        self.mode_menu.grid(row=1, column=0, sticky="ew", padx=18, pady=6)
+        ctk.CTkLabel(task, text="下载方式", text_color=MUTED, anchor="w").grid(row=1, column=0, sticky="ew")
+        self.mode_menu = ctk.CTkOptionMenu(task, values=list(LABEL_TO_MODE), variable=self.mode_var,
+                                            command=self._handle_mode_change, height=34,
+                                            fg_color=SURFACE, button_color=BORDER,
+                                            button_hover_color="#3a4a60")
+        self.mode_menu.grid(row=2, column=0, sticky="ew", pady=(4, 10))
 
-        self.url_box = ctk.CTkTextbox(panel, height=100, fg_color="#0d1117", border_width=1, border_color="#30363d")
-        self.url_box.grid(row=2, column=0, sticky="ew", padx=18, pady=6)
+        ctk.CTkLabel(task, text="资源地址或片段列表", text_color=MUTED, anchor="w").grid(row=3, column=0, sticky="ew")
+        self.url_box = ctk.CTkTextbox(task, height=84, fg_color=FIELD, border_width=1,
+                                       border_color=BORDER, text_color=TEXT, corner_radius=8)
+        self.url_box.grid(row=4, column=0, sticky="ew", pady=(4, 0))
         self.url_box.insert("1.0", "https://example.com/video.m3u8")
 
-        sniff_row = ctk.CTkFrame(panel, fg_color="transparent")
-        sniff_row.grid(row=3, column=0, sticky="ew", padx=18, pady=6)
-        sniff_row.grid_columnconfigure(1, weight=1)
-        self.parse_button = ctk.CTkButton(
-            sniff_row,
-            text=PARSE_BUTTON_TEXT,
-            width=104,
-            command=self._parse_page,
-            fg_color="#1f6feb",
-        )
+        self.sniff_controls = ctk.CTkFrame(task, fg_color="transparent")
+        self.sniff_controls.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        self.sniff_controls.grid_columnconfigure(1, weight=1)
+        self.parse_button = ctk.CTkButton(self.sniff_controls, text=PARSE_BUTTON_TEXT,
+                                           width=100, height=34, command=self._parse_page,
+                                           fg_color=ACCENT, hover_color="#3974df")
         self.parse_button.grid(row=0, column=0, sticky="w")
-        self.quality_menu = ctk.CTkOptionMenu(
-            sniff_row,
-            values=[AUTO_QUALITY_LABEL],
-            variable=self.quality_var,
-            width=260,
-            dynamic_resizing=False,
-        )
+        self.quality_menu = ctk.CTkOptionMenu(self.sniff_controls, values=[AUTO_QUALITY_LABEL],
+                                               variable=self.quality_var, dynamic_resizing=False,
+                                               height=34, fg_color=SURFACE, button_color=BORDER)
         self.quality_menu.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        ctk.CTkLabel(panel, text=QUALITY_HINT + "\\n" + SNIFF_HINT, text_color="#8b949e", wraplength=360, justify="left").grid(
-            row=4, column=0, sticky="w", padx=18, pady=(0, 4)
-        )
+        ctk.CTkLabel(self.sniff_controls, text="解析页面后选择清晰度", text_color=MUTED,
+                     font=ctk.CTkFont(size=12), anchor="w").grid(row=1, column=0, columnspan=2,
+                                                                    sticky="ew", pady=(4, 0))
+        self._sync_mode_controls()
 
-        dir_row = ctk.CTkFrame(panel, fg_color="transparent")
-        dir_row.grid(row=5, column=0, sticky="ew", padx=18, pady=6)
+        self._divider(form, 1)
+        destination = ctk.CTkFrame(form, fg_color="transparent")
+        destination.grid(row=2, column=0, sticky="ew", padx=14)
+        destination.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(destination, text="保存位置", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        dir_row = ctk.CTkFrame(destination, fg_color="transparent")
+        dir_row.grid(row=1, column=0, sticky="ew")
         dir_row.grid_columnconfigure(0, weight=1)
-        self.output_dir_entry = ctk.CTkEntry(dir_row, textvariable=self.output_dir_var, placeholder_text="保存目录")
+        self.output_dir_entry = ctk.CTkEntry(dir_row, textvariable=self.output_dir_var,
+                                               placeholder_text="保存目录", height=34,
+                                               fg_color=FIELD, border_color=BORDER)
         self.output_dir_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        browse = ctk.CTkButton(dir_row, text="选择", width=84, command=self._choose_output_dir)
-        browse.grid(row=0, column=1)
+        ctk.CTkButton(dir_row, text="浏览", width=70, height=34,
+                      fg_color=BORDER, hover_color="#3a4a60", command=self._choose_output_dir).grid(row=0, column=1)
+        self.output_name_entry = ctk.CTkEntry(destination, textvariable=self.output_name_var,
+                                                placeholder_text="输出文件名（可选）", height=34,
+                                                fg_color=FIELD, border_color=BORDER)
+        self.output_name_entry.grid(row=2, column=0, sticky="ew", pady=(8, 0))
 
-        self.output_name_entry = ctk.CTkEntry(panel, textvariable=self.output_name_var, placeholder_text="输出文件名")
-        self.output_name_entry.grid(row=6, column=0, sticky="ew", padx=18, pady=6)
+        self._divider(form, 3)
+        options = ctk.CTkFrame(form, fg_color="transparent")
+        options.grid(row=4, column=0, sticky="ew", padx=14)
+        options.grid_columnconfigure((0, 1, 2), weight=1)
+        ctk.CTkLabel(options, text="下载选项", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold"), anchor="w").grid(
+                         row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self._number_field(options, "并发", self.concurrency_var, 0)
+        self._number_field(options, "超时（秒）", self.timeout_var, 1)
+        self._number_field(options, "重试", self.retries_var, 2)
+        checks = ctk.CTkFrame(options, fg_color="transparent")
+        checks.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        checks.grid_columnconfigure((0, 1), weight=1)
+        check_style = {"text_color": TEXT, "font": ctk.CTkFont(size=12),
+                       "checkbox_width": 18, "checkbox_height": 18,
+                       "fg_color": ACCENT, "hover_color": "#3974df"}
+        self.resume = ctk.CTkCheckBox(checks, text="断点续传", variable=self.resume_var, **check_style)
+        self.resume.grid(row=0, column=0, sticky="w", pady=5)
+        self.combine = ctk.CTkCheckBox(checks, text="合并片段", variable=self.combine_var, **check_style)
+        self.combine.grid(row=0, column=1, sticky="w", pady=5)
+        self.impersonate = ctk.CTkCheckBox(checks, text="浏览器指纹伪装", variable=self.impersonate_var, **check_style)
+        self.impersonate.grid(row=1, column=0, sticky="w", pady=5)
+        self.use_browser = ctk.CTkCheckBox(checks, text="浏览器抓包", variable=self.browser_var, **check_style)
+        self.use_browser.grid(row=1, column=1, sticky="w", pady=5)
+        self.verify_ssl = ctk.CTkCheckBox(checks, text="校验 SSL 证书", variable=self.verify_ssl_var, **check_style)
+        self.verify_ssl.grid(row=2, column=0, sticky="w", pady=5)
 
-        controls = ctk.CTkFrame(panel, fg_color="#0d1117", corner_radius=8)
-        controls.grid(row=7, column=0, sticky="ew", padx=18, pady=10)
-        controls.grid_columnconfigure((0, 1, 2), weight=1)
-        self._number_field(controls, "并发数", self.concurrency_var, 0)
-        self._number_field(controls, "超时秒数", self.timeout_var, 1)
-        self._number_field(controls, "重试次数", self.retries_var, 2)
-
-        self.verify_ssl = ctk.CTkCheckBox(panel, text="校验 SSL 证书", variable=self.verify_ssl_var)
-        self.verify_ssl.grid(row=8, column=0, sticky="w", padx=18, pady=(6, 2))
-        self.combine = ctk.CTkCheckBox(panel, text="合并已下载片段", variable=self.combine_var)
-        self.combine.grid(row=9, column=0, sticky="w", padx=18, pady=(2, 2))
-        self.impersonate = ctk.CTkCheckBox(
-            panel,
-            text="浏览器指纹伪装（curl_cffi，Cloudflare 站点必开）",
-            variable=self.impersonate_var,
-        )
-        self.impersonate.grid(row=10, column=0, sticky="w", padx=18, pady=(2, 2))
-        self.use_browser = ctk.CTkCheckBox(
-            panel,
-            text="源码里没有 m3u8 时启动浏览器抓包",
-            variable=self.browser_var,
-        )
-        self.use_browser.grid(row=11, column=0, sticky="w", padx=18, pady=(2, 2))
-        self.resume = ctk.CTkCheckBox(
-            panel,
-            text="断点续传（复用已下好的分片，半截分片用 Range 接着下）",
-            variable=self.resume_var,
-        )
-        self.resume.grid(row=12, column=0, sticky="w", padx=18, pady=(2, 10))
-
-        advanced_row = ctk.CTkFrame(panel, fg_color="transparent")
-        advanced_row.grid(row=13, column=0, sticky="ew", padx=18, pady=(8, 6))
-        advanced_row.grid_columnconfigure(0, weight=1)
-        advanced = ctk.CTkLabel(advanced_row, text="请求头和 Cookie", font=ctk.CTkFont(size=14, weight="bold"))
-        advanced.grid(row=0, column=0, sticky="w")
-        self.header_preset_menu = ctk.CTkOptionMenu(
-            advanced_row,
-            values=list(HEADER_PRESETS.keys()),
-            variable=self.header_preset_var,
-            width=138,
-            command=self._apply_header_preset,
-        )
-        self.header_preset_menu.grid(row=0, column=1, sticky="e")
-
-        ctk.CTkLabel(panel, text=HEADER_HINT, text_color="#8b949e", wraplength=360, justify="left").grid(
-            row=14, column=0, sticky="w", padx=18, pady=(0, 4)
-        )
-        self.headers_box = ctk.CTkTextbox(panel, height=76, fg_color="#0d1117", border_width=1, border_color="#30363d")
-        self.headers_box.grid(row=15, column=0, sticky="ew", padx=18, pady=6)
+        self._divider(form, 5)
+        advanced = ctk.CTkFrame(form, fg_color="transparent")
+        advanced.grid(row=6, column=0, sticky="ew", padx=14, pady=(0, 12))
+        advanced.grid_columnconfigure(0, weight=1)
+        self.advanced_open = False
+        self.advanced_button = ctk.CTkButton(advanced, text="网络设置  ›", anchor="w",
+                                              fg_color="transparent", hover_color=SURFACE,
+                                              text_color=TEXT, font=ctk.CTkFont(size=14, weight="bold"),
+                                              height=30, command=self._toggle_advanced)
+        self.advanced_button.grid(row=0, column=0, sticky="ew")
+        self.advanced_body = ctk.CTkFrame(advanced, fg_color="transparent")
+        self.advanced_body.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.advanced_body.grid_columnconfigure(0, weight=1)
+        self.header_preset_menu = ctk.CTkOptionMenu(self.advanced_body, values=list(HEADER_PRESETS),
+                                                     variable=self.header_preset_var, command=self._apply_header_preset,
+                                                     height=32, fg_color=SURFACE, button_color=BORDER)
+        self.header_preset_menu.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(self.advanced_body, text="请求头 · 每行一个", text_color=MUTED,
+                     anchor="w").grid(row=1, column=0, sticky="ew", pady=(8, 2))
+        self.headers_box = ctk.CTkTextbox(self.advanced_body, height=72, fg_color=FIELD,
+                                           border_width=1, border_color=BORDER)
+        self.headers_box.grid(row=2, column=0, sticky="ew")
         self.headers_box.insert("1.0", HEADER_PRESETS[self.header_preset_var.get()])
-        ctk.CTkLabel(panel, text=COOKIE_HINT, text_color="#8b949e", wraplength=360, justify="left").grid(
-            row=16, column=0, sticky="w", padx=18, pady=(2, 4)
-        )
-        self.cookies_box = ctk.CTkTextbox(panel, height=60, fg_color="#0d1117", border_width=1, border_color="#30363d")
-        self.cookies_box.grid(row=17, column=0, sticky="ew", padx=18, pady=6)
+        ctk.CTkLabel(self.advanced_body, text="Cookie", text_color=MUTED,
+                     anchor="w").grid(row=3, column=0, sticky="ew", pady=(8, 2))
+        self.cookies_box = ctk.CTkTextbox(self.advanced_body, height=52, fg_color=FIELD,
+                                           border_width=1, border_color=BORDER)
+        self.cookies_box.grid(row=4, column=0, sticky="ew")
+        ctk.CTkLabel(self.advanced_body, text="Cloudflare 站点通常还需要 Referer；留空 User-Agent 可使用默认浏览器指纹。",
+                     text_color=MUTED, font=ctk.CTkFont(size=11), wraplength=380,
+                     justify="left", anchor="w").grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        self.advanced_body.grid_remove()
 
-        action_row = ctk.CTkFrame(panel, fg_color="transparent")
-        action_row.grid(row=18, column=0, sticky="ew", padx=18, pady=(14, 18))
-        action_row.grid_columnconfigure((0, 1), weight=1)
-        self.start_button = ctk.CTkButton(action_row, text="开始", command=self._start_download, fg_color="#238636")
-        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.cancel_button = ctk.CTkButton(action_row, text="取消", command=self._cancel_download, state="disabled", fg_color="#8b3434")
-        self.cancel_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        footer = ctk.CTkFrame(panel, fg_color=PANEL, corner_radius=0)
+        footer.grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 14))
+        footer.grid_columnconfigure(0, weight=2)
+        footer.grid_columnconfigure(1, weight=1)
+        self.start_button = ctk.CTkButton(footer, text="开始下载", command=self._start_download,
+                                           height=40, fg_color=ACCENT, hover_color="#3974df",
+                                           font=ctk.CTkFont(size=14, weight="bold"))
+        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.cancel_button = ctk.CTkButton(footer, text="取消", command=self._cancel_download,
+                                            state="disabled", height=40,
+                                            fg_color=SURFACE, hover_color=BORDER)
+        self.cancel_button.grid(row=0, column=1, sticky="ew")
+
+    def _divider(self, parent: ctk.CTkScrollableFrame, row: int) -> None:
+        ctk.CTkFrame(parent, height=1, fg_color=BORDER).grid(
+            row=row, column=0, sticky="ew", padx=14, pady=14)
 
     def _number_field(self, parent: ctk.CTkFrame, label: str, variable: ctk.StringVar, column: int) -> None:
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.grid(row=0, column=column, sticky="ew", padx=8, pady=10)
-        ctk.CTkLabel(frame, text=label, text_color="#8b949e").grid(row=0, column=0, sticky="w")
-        entry = ctk.CTkEntry(frame, textvariable=variable, width=76)
-        entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        frame.grid(row=1, column=column, sticky="ew", padx=(0, 8) if column < 2 else 0)
+        frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(frame, text=label, text_color=MUTED, anchor="w",
+                     font=ctk.CTkFont(size=12)).grid(row=0, column=0, sticky="ew")
+        ctk.CTkEntry(frame, textvariable=variable, height=32, fg_color=FIELD,
+                     border_color=BORDER).grid(row=1, column=0, sticky="ew", pady=(3, 0))
+
+    def _toggle_advanced(self) -> None:
+        self.advanced_open = not self.advanced_open
+        if self.advanced_open:
+            self.advanced_body.grid()
+        else:
+            self.advanced_body.grid_remove()
+        self.advanced_button.configure(text="网络设置  ⌄" if self.advanced_open else "网络设置  ›")
+
+    def _handle_mode_change(self, selected: str) -> None:
+        self._on_mode_change(selected)
+        self._sync_mode_controls()
+
+    def _sync_mode_controls(self) -> None:
+        if self.mode_var.get() == SNIFF_LABEL:
+            self.sniff_controls.grid()
+        else:
+            self.sniff_controls.grid_remove()
 
     def _apply_header_preset(self, selected: str) -> None:
         preset = HEADER_PRESETS.get(selected)
@@ -329,6 +362,7 @@ class VideoLoaderApp(ctk.CTk):
         if LABEL_TO_MODE.get(current_label) != "sniff":
             self.mode_var.set(SNIFF_LABEL)
             self._on_mode_change(SNIFF_LABEL)
+            self._sync_mode_controls()
 
         try:
             task = self._build_task()
@@ -337,6 +371,7 @@ class VideoLoaderApp(ctk.CTk):
             return
 
         self.parsing = True
+        self.activity_var.set("正在解析网页")
         self.quality_choices = []
         self.parsed_page_url = ""
         self.quality_menu.configure(values=[AUTO_QUALITY_LABEL])
@@ -384,12 +419,12 @@ class VideoLoaderApp(ctk.CTk):
         tooltip.overrideredirect(True)
         tooltip.attributes("-topmost", True)
 
-        frame = ctk.CTkFrame(tooltip, fg_color="#161b22", border_width=1, border_color="#30363d", corner_radius=8)
+        frame = ctk.CTkFrame(tooltip, fg_color=PANEL, border_width=1, border_color=BORDER, corner_radius=8)
         frame.grid(row=0, column=0)
         ctk.CTkLabel(
             frame,
             text=TASK_TOOLTIP,
-            text_color="#c9d1d9",
+            text_color=TEXT,
             justify="left",
             anchor="w",
             wraplength=360,
@@ -406,20 +441,28 @@ class VideoLoaderApp(ctk.CTk):
             self.task_tooltip = None
 
     def _build_log_panel(self) -> None:
-        panel = ctk.CTkFrame(self, fg_color="#0d1117", corner_radius=10)
-        panel.grid(row=1, column=1, sticky="nsew", padx=(10, 18), pady=18)
+        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=14,
+                             border_width=1, border_color=BORDER)
+        panel.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=(0, 16))
         panel.grid_columnconfigure(0, weight=1)
-        panel.grid_rowconfigure(2, weight=1)
+        panel.grid_rowconfigure(3, weight=1)
 
-        ctk.CTkLabel(panel, text="运行日志", font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=18, pady=(18, 6)
+        ctk.CTkLabel(panel, text="下载进度", text_color=TEXT,
+                     font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=18, pady=(16, 0)
         )
-        self.progress = ctk.CTkProgressBar(panel, height=12)
-        self.progress.grid(row=1, column=0, sticky="ew", padx=18, pady=(4, 10))
+        ctk.CTkLabel(panel, textvariable=self.activity_var, text_color=MUTED,
+                     font=ctk.CTkFont(size=12), anchor="w").grid(
+            row=1, column=0, sticky="ew", padx=18, pady=(2, 10))
+        self.progress = ctk.CTkProgressBar(panel, height=7, progress_color=ACCENT,
+                                            fg_color=FIELD)
+        self.progress.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 16))
         self.progress.set(0)
 
-        self.log_box = ctk.CTkTextbox(panel, fg_color="#06090f", border_width=1, border_color="#30363d")
-        self.log_box.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        self.log_box = ctk.CTkTextbox(panel, fg_color=FIELD, border_width=1,
+                                       border_color=BORDER, text_color="#c7d3e2",
+                                       font=ctk.CTkFont(size=12))
+        self.log_box.grid(row=3, column=0, sticky="nsew", padx=18, pady=(0, 18))
         self.log_box.insert("1.0", "准备就绪。\n")
 
     def _choose_output_dir(self) -> None:
@@ -468,6 +511,7 @@ class VideoLoaderApp(ctk.CTk):
     def _start_worker(self, task: DownloadTask) -> None:
         self.cancel_event.clear()
         self.progress.set(0)
+        self.activity_var.set("正在下载")
         self._set_running(True)
         self._log("开始下载...")
         self.worker = threading.Thread(target=self._run_download, args=(task,), daemon=True)
@@ -476,6 +520,7 @@ class VideoLoaderApp(ctk.CTk):
     def _start_install_then_download(self, task: DownloadTask) -> None:
         self.cancel_event.clear()
         self.progress.set(0)
+        self.activity_var.set("正在准备 ffmpeg")
         self._set_running(True)
         self._log("开始安装 ffmpeg...")
         self.worker = threading.Thread(target=self._install_then_run_download, args=(task,), daemon=True)
@@ -494,6 +539,7 @@ class VideoLoaderApp(ctk.CTk):
     def _start_install_aria2_then_download(self, task: DownloadTask) -> None:
         self.cancel_event.clear()
         self.progress.set(0)
+        self.activity_var.set("正在准备 aria2")
         self._set_running(True)
         self._log("开始安装 aria2...")
         self.worker = threading.Thread(target=self._install_aria2_then_run_download, args=(task,), daemon=True)
@@ -601,6 +647,7 @@ class VideoLoaderApp(ctk.CTk):
 
     def _cancel_download(self) -> None:
         self.cancel_event.set()
+        self.activity_var.set("正在取消")
         self._log("正在取消...")
 
     def _queue_log(self, message: str) -> None:
@@ -618,6 +665,7 @@ class VideoLoaderApp(ctk.CTk):
                 elif kind == "progress":
                     value, message = payload  # type: ignore[misc]
                     self.progress.set(float(value))
+                    self.activity_var.set(f"正在下载 · {float(value):.0%}")
                     if message:
                         self._log(str(message))
                 elif kind == "result":
@@ -627,10 +675,12 @@ class VideoLoaderApp(ctk.CTk):
                     self._handle_install_error(str(tool), str(message))
                 elif kind == "sniff_ok":
                     self.parsing = False
+                    self.activity_var.set("网页解析完成")
                     self._restore_parse_button()
                     self._apply_sniff_result(payload)  # type: ignore[arg-type]
                 elif kind == "sniff_error":
                     self.parsing = False
+                    self.activity_var.set("网页解析失败")
                     self._restore_parse_button()
                     self._log(f"解析失败：{payload}")
                     messagebox.showerror("解析失败", str(payload))
@@ -652,6 +702,7 @@ class VideoLoaderApp(ctk.CTk):
         super().destroy()
 
     def _handle_result(self, result: DownloadResult) -> None:
+        self.activity_var.set("下载完成" if result.success else "已取消" if self.cancel_event.is_set() else "下载失败")
         if result.success:
             self.progress.set(1)
             self._log(result.message)
@@ -662,6 +713,7 @@ class VideoLoaderApp(ctk.CTk):
         self._set_running(False)
 
     def _handle_install_error(self, tool: str, message: str) -> None:
+        self.activity_var.set(f"{tool} 准备失败")
         self._log(f"{tool} 安装失败：{message}")
         self.status_var.set(self._ffmpeg_status())
         self._set_running(False)
@@ -672,7 +724,7 @@ class VideoLoaderApp(ctk.CTk):
         self.cancel_button.configure(state="normal" if running else "disabled")
         self.parse_button.configure(
             state="disabled" if running else "normal",
-            text="解析中..." if running else PARSE_BUTTON_TEXT,
+            text=PARSE_BUTTON_TEXT,
         )
 
     def _heartbeat(self) -> None:
@@ -686,11 +738,10 @@ class VideoLoaderApp(ctk.CTk):
     def _ffmpeg_status(self) -> str:
         ffmpeg = find_ffmpeg()
         aria2 = find_aria2c()
-        browser = "可用" if browser_available() else "不可用"
-        return (
-            f"通用桌面下载工具 - ffmpeg：{ffmpeg or '未找到'}  aria2：{aria2 or '未找到'}\n"
-            f"HTTP：{transport_label()}  浏览器抓包：{browser}"
-        )
+        browser = "就绪" if browser_available() else "不可用"
+        return (f"ffmpeg {'就绪' if ffmpeg else '未安装'}  ·  "
+                f"aria2 {'就绪' if aria2 else '未安装'}  ·  "
+                f"HTTP {transport_label()}  ·  浏览器 {browser}")
 
 
 def main() -> None:
